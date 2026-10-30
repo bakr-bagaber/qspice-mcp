@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "qspice": {
+      "command": "C:\\Users\\bakrb\\qspice-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "qspice_mcp.server"],
+      "env": {
+        "QSPICE_MCP_WORKDIR": "C:\\Users\\bakrb\\Documents\\QSPICE-MCP"
+      }
+    }
+  }
+}
