@@ -149,20 +149,26 @@ def build_parts(spec: dict) -> tuple[list[Part], list[str]]:
         if ref.lower() in seen:
             raise ValueError(f"duplicate reference designator {ref}")
         seen.add(ref.lower())
+        val, vnote = normalize_value(str(c.get("value", "") or ""), letter)
+        if vnote:
+            notes.append(f"{ref}: {vnote}")
         p = Part(ref=ref, sym_name=sym.name, node=node, pin_names=names,
                  pin_local=[pp.local for pp in pins], pin_optional=[bool(pp.default_net) for pp in pins],
-                 nets=nets, value=str(c.get("value", "") or ""), params=dict(c.get("params") or {}),
+                 nets=nets, value=val, params=dict(c.get("params") or {}),
                  extra_texts=list(c.get("attributes") or []))
         t = sym.type
         required = [i for i in range(len(pins)) if not p.pin_optional[i]]
-        if len(required) == 2 and len(pins) <= 3:
+        if not sym.name and not t:          # hierarchical block (child schematic)
+            p.kind = "block"; p.codes = [0]; p.own_texts = True
+            p.value = ""                    # 2nd text = child sheet name: keep it
+        elif len(required) == 2 and len(pins) <= 3:
             p.kind = "2term"; p.codes = [0, 2, 4, 6]
         elif t[:1] in ("Q", "M", "J", "Z") and len(required) <= 4:
             p.kind = "fet" if t[:1] in "MJZ" else "bjt"; p.codes = [0, 8]
         elif {"IN+", "IN-", "OUT"} <= {n.upper() for n in names}:
             p.kind = "opamp"; p.codes = [0, 12]; p.own_texts = True
         else:
-            p.kind = "block"; p.codes = [0]; p.own_texts = len(sym.texts()) > 2 or sym.type == "X"
+            p.kind = "block"; p.codes = [0]; p.own_texts = len(sym.texts()) > 2 or sym.type in ("X", "")
         if "rotation" in c or "mirror" in c:
             rot = int(c.get("rotation", 0)) // 90 % 4
             p.codes = [qsch.make_code(rot, bool(c.get("mirror")))]
@@ -194,7 +200,66 @@ def _match_pin(key: str, names: list[str]) -> int | None:
         for i, n in enumerate(names):
             if n.lower() == k:
                 return i
+    # equivalence groups: accept any spelling when exactly one pin of the
+    # symbol belongs to the same group
+    kl = key.lower()
+    for grp in _PIN_GROUPS:
+        if kl in grp:
+            hits = [i for i, n in enumerate(names) if n.lower() in grp]
+            if len(hits) == 1:
+                return hits[0]
     return None
+
+
+_PIN_GROUPS = [
+    {"in+", "inp", "+in", "in_p", "noninv", "non_inverting", "noninverting", "ni", "vin+", "+"},
+    {"in-", "inn", "-in", "in_n", "inv", "inverting", "vin-", "-"},
+    {"out", "output", "vout", "o", "y"},
+    {"v+", "vcc", "vdd", "vp", "+v", "vpos", "vs+", "v+supply", "pwr", "vsupply"},
+    {"v-", "vee", "vss", "vn", "-v", "vneg", "vs-", "gnd", "com"},
+    {"a", "anode"}, {"k", "cathode"},
+    {"c", "collector"}, {"b", "base"}, {"e", "emitter"},
+    {"d", "drain"}, {"g", "gate"}, {"s", "source"},
+]
+
+_UNIT_RE = re.compile(r"^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(meg|Meg|MEG|[TGMkKmuUnNpPfFµμ])?\s*"
+                      r"(Ω|Ω|ohms?|Ohms?|OHMS?|V|v|A|F|H|Hz|hz|HZ|s|sec|W)?\s*$")
+
+
+def normalize_value(v: str, letter: str = "") -> tuple[str, str | None]:
+    """'10kΩ' -> '10K', '100nF' -> '100n', '3.3V' -> '3.3', '1MΩ' -> '1Meg'.
+    Returns (value, note-or-None).  Leaves expressions/source functions alone."""
+    s = str(v).strip()
+    m = _UNIT_RE.match(s)
+    if not m:
+        if "µ" in s or "μ" in s or "Ω" in s or "Ω" in s:
+            t = s.replace("µ", "u").replace("μ", "u").replace("Ω", "").replace("Ω", "")
+            return t, f"value '{s}' rewritten as '{t}' (ASCII, no unit symbols)"
+        return s, None
+    num, scale, unit = m.group(1), m.group(2) or "", m.group(3) or ""
+    note = None
+    sc = scale
+    if scale in ("µ", "μ", "U"):
+        sc = "u"
+    elif scale.lower() == "meg":
+        sc = "Meg"
+    elif scale == "M":
+        if unit in ("Ω", "Ω") or unit.lower().startswith("ohm") or unit.lower() == "hz":
+            sc = "Meg"           # 1MΩ / 1MHz clearly means mega
+        elif letter.upper() == "R" and not unit:
+            note = (f"'{s}': in SPICE 'M' means milli (1e-3). Write '{num}Meg' for mega-ohms. "
+                    f"Kept as written - check the value.")
+    elif scale == "K":
+        sc = "K"
+    elif scale in ("N", "P"):
+        sc = scale.lower()
+    elif scale == "F" and unit == "":
+        sc = "f"                 # femto (rare) - keep
+    out = num + sc
+    if unit or sc != scale:
+        if note is None and (unit or scale in ("µ", "μ")):
+            note = f"value '{s}' written as '{out}' (drafting standard: no units, ASCII multipliers)"
+    return out, note
 
 
 # ================================================================= geometry ==
@@ -255,12 +320,21 @@ def _graphic_points(node: Node, skip_pin_stubs: bool = False):
                 inner = tp[1] if tp[0] in pinpts else tp[0]
                 pts.append(inner)
                 continue
-            if c.kind in ("rect", "ellipse", "zigzag", "coil") and len(tp) >= 2:
+            if c.kind == "ellipse" and len(tp) >= 2:
+                pts += _ellipse_pts(tp[0], tp[1])
+            elif c.kind in ("rect", "zigzag", "coil") and len(tp) >= 2:
                 (x0, y0), (x1, y1) = tp[0], tp[1]
                 pts += [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
             else:
                 pts += tp
     return pts
+
+
+def _ellipse_pts(a, b, n: int = 16):
+    (x0, y0), (x1, y1) = a, b
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    rx, ry = abs(x1 - x0) / 2, abs(y1 - y0) / 2
+    return [(cx + rx * math.cos(2 * math.pi * k / n), cy + ry * math.sin(2 * math.pi * k / n)) for k in range(n)]
 
 
 def _segments(node: Node):
@@ -271,11 +345,11 @@ def _segments(node: Node):
         k = c.kind
         if k == "line" and len(tp) >= 2:
             segs.append((tp[0], tp[1]))
-        elif k in ("rect", "ellipse", "zigzag", "coil") and len(tp) >= 2:
+        elif k == "ellipse" and len(tp) >= 2:
+            pe = _ellipse_pts(tp[0], tp[1])
+            segs += list(zip(pe, pe[1:] + pe[:1]))
+        elif k in ("rect", "zigzag", "coil") and len(tp) >= 2:
             (x0, y0), (x1, y1) = tp[0], tp[1]
-            if k == "zigzag" or k == "coil":
-                # the drawn wiggle spans the long axis; keep its centre line + box
-                pass
             segs += [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))]
         elif k == "triangle" and len(tp) >= 3:
             segs += [(tp[0], tp[1]), (tp[1], tp[2]), (tp[2], tp[0])]
@@ -1014,6 +1088,30 @@ def route_drawing(parts: list[Part], nets: dict[str, NetInfo], label_names: set[
     for (i, j, P, n) in stub_list:
         d = parts[i].geo[parts[i].code]["dirs"][j]
         placed = False
+        if n == "0" and d in ("L", "R"):
+            # ground symbols point down: out of the pin, then down (an L-shaped stub)
+            for L in (1, 2):
+                out = (P[0] + DIRS[d][0] * G * L, P[1])
+                down = [(out[0], out[1] - G * k) for k in (1, 2)]
+                pts = [(P[0] + DIRS[d][0] * G * k, P[1]) for k in range(1, L + 1)] + down[:1]
+                zone = _label_zone(down[0], "D", "GND")
+                if all(_free(R, q) for q in pts) and all(_free(R, q, soft_ok=True) for q in zone):
+                    key = f"__stub_{n}_{i}_{j}"
+                    path = [P] + pts
+                    for q_ in pts:
+                        R.owner[q_] = key
+                    R.pins[down[0]] = key
+                    for a, b in zip(path, path[1:]):
+                        R.edges[frozenset((a, b))] = key
+                    for q_ in zone:
+                        R.blocked.add(q_)
+                    dr.wires.append((P, out, n))
+                    dr.wires.append((out, down[0], n))
+                    dr.labels.append((down[0], "GND", _DIR_JUST["D"]))
+                    placed = True
+                    break
+            if placed:
+                continue
         order = [d] + [x for x in ("D", "L", "R", "U") if x != d]
         if nets[n].kind == "pos":
             order = [d, "U", "L", "R", "D"]
@@ -1320,14 +1418,15 @@ def _choose_side(p: Part, dr: Drawing, default, lines):
 
 # ================================================================== emit ====
 
-def emit(dr: Drawing, directives: list[str], title: str | None = None, comments: list | None = None) -> Schematic:
+def emit(dr: Drawing, directives: list[str], title: str | None = None, comments: list | None = None,
+         ports: set | None = None) -> Schematic:
     sch = Schematic()
     for p in dr.parts:
         set_part_texts(p, dr)
         sch.add_component(p.node, p.pos, p.code)
-    named = {}
+    ports = {x.lower() for x in (ports or set())}
     for pt_, name, just in dr.labels:
-        sch.add_net_label(pt_, name, just)
+        sch.add_net_label(pt_, name, just, port=name.lower() in ports)
     for p_ in sorted(set(dr.junctions)):
         sch.add_junction(p_)
     for a, b, n in dr.wires:
@@ -1335,12 +1434,37 @@ def emit(dr: Drawing, directives: list[str], title: str | None = None, comments:
     from .render import schematic_bbox
     bb = schematic_bbox(sch, include_text=True)
     if directives:
-        sch.add_text((bb[0] + 250, bb[1] + 100), "\n".join(directives), directive=True, size=1, just=5)
+        sch.add_text((bb[0] + 250, bb[1] + 100), "\n".join(wrap_directives(directives)), directive=True, size=1, just=5)
     if title:
         sch.add_text((bb[0] + 250, bb[3] + 50), title, directive=False, size=1.0, just=6)
     for c in comments or []:
         sch.add_text(tuple(c.get("position", (bb[2], bb[3]))), c["text"], directive=False, size=c.get("size", 1), just=7)
     return sch
+
+
+_TOK = re.compile(r'\{[^}]*\}|"[^"]*"|\([^)]*\)|\S+')
+
+
+def wrap_directives(lines: list[str], width: int = 78) -> list[str]:
+    """Split long .model/.param lines into SPICE continuation lines ('+ ...')
+    so the directive block stays compact and readable on the sheet."""
+    out = []
+    for raw in lines:
+        for line in str(raw).split("\n"):
+            if len(line) <= width or not re.match(r"^\s*\.(model|param)\b", line, re.I):
+                out.append(line)
+                continue
+            toks = _TOK.findall(line)
+            cur = ""
+            for t in toks:
+                if cur and len(cur) + 1 + len(t) > width:
+                    out.append(cur)
+                    cur = "+ " + t
+                else:
+                    cur = (cur + " " + t) if cur else t
+            if cur:
+                out.append(cur)
+    return out
 
 
 def _directive_nets(directives: list[str]) -> set[str]:
@@ -1383,6 +1507,18 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
             label_names.add(n)
         elif policy != "none" and (n.lower() in referenced or IO_NET.match(n)):
             label_names.add(n)
+    # hierarchical sheet: every port net gets a port label
+    ports = [str(x) for x in (spec.get("ports") or [])]
+    port_set = set()
+    for pn in ports:
+        hit = [n for n in nets if n.lower() == pn.lower()]
+        if not hit:
+            notes.append(f"port '{pn}' is not a net of this sheet (ignored)")
+            continue
+        if nets[hit[0]].kind != "signal":
+            nets[hit[0]].kind = "signal"      # supplies become explicit ports
+        label_names.add(hit[0])
+        port_set.add(hit[0])
     n = len(parts)
     iters = int(min(60000, (900 + 450 * n) * effort))
     starts = max(1, min(6, effort * 2))
@@ -1419,7 +1555,13 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
         p.pos, p.code = pos, code
     dr = route_drawing(parts, nets, set(label_names), style)
     # fresh symbol copies before writing texts (route_drawing doesn't touch nodes)
-    sch = emit(dr, directives, spec.get("title"), spec.get("comments"))
+    sch = emit(dr, directives, spec.get("title"), spec.get("comments"), ports=port_set)
+    if opts.get("optimize_labels", True):
+        try:
+            from . import labels as _labels
+            _labels.optimize(sch)
+        except Exception as e:  # never fail a drawing because of cosmetics
+            notes.append(f"text-placement optimizer skipped: {e}")
     out = Path(out_path) if out_path else None
     result = {"notes": notes, "metrics": dr.metrics, "attempt_scores": tried,
               "nets": {k: {"kind": v.kind, "pins": [f"{parts[i].ref}.{parts[i].pin_names[j]}" for i, j in v.pins]} for k, v in nets.items()},
@@ -1431,6 +1573,15 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
         result["path"] = str(out)
         if validate:
             result["validation"] = validate_drawing(out, parts)
+    if opts.get("review", True):
+        try:
+            from .review import review as _review
+            rv = _review(sch)
+            result["review"] = {"score": rv["score"], "grade": rv["grade"], "counts": rv["counts"],
+                                "issues": [{k: i[k] for k in ("severity", "code", "message", "fix") if k in i}
+                                           for i in rv["issues"][:10]]}
+        except Exception as e:
+            result["review"] = {"error": str(e)}
     result["_schematic"] = sch
     return result
 

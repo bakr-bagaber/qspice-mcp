@@ -92,14 +92,16 @@ def place_component(sch: Schematic, symbol: str, x, y, ref: str | None = None, v
              pin_local=[pp.local for pp in pins], pin_optional=[bool(pp.default_net) for pp in pins],
              nets=["x"] * len(pins), value=value or "", params=dict(params or {}), extra_texts=list(attributes or []))
     req = [i for i in range(len(pins)) if not p.pin_optional[i]]
-    if len(req) == 2 and len(pins) <= 3:
+    if not sym.name and not sym.type:      # hierarchical block (child schematic)
+        p.kind = "block"; p.own_texts = True
+    elif len(req) == 2 and len(pins) <= 3:
         p.kind = "2term"
     elif sym.type[:1] in ("Q", "M", "J", "Z"):
         p.kind = "bjt" if sym.type[:1] == "Q" else "fet"
     elif {"IN+", "IN-", "OUT"} <= {n.upper() for n in p.pin_names}:
         p.kind = "opamp"; p.own_texts = True
     else:
-        p.kind = "block"; p.own_texts = len(sym.texts()) > 2 or sym.type == "X"
+        p.kind = "block"; p.own_texts = len(sym.texts()) > 2 or sym.type in ("X", "")
     p.codes = [code]; p.code = code
     p.pos = (snap(x), snap(y))
     prepare_geometry(p)
@@ -241,10 +243,14 @@ def _router_for(sch: Schematic, allow_nets: set):
                 if m is None and (_on_seg(c_, a, b) or _on_seg(d_, a, b) or _on_seg(a, c_, d_) or _on_seg(b, c_, d_)):
                     wire_net[(c_, d_)] = n
                     changed = True
+    net_points: dict = {}
+    for p, n in pin_net.items():
+        net_points.setdefault(n, set()).add(p)
     for k, ((a, b), n) in enumerate(wire_net.items()):
         n = n or f"__w{k}"
         key = MERGE if n in allow_nets else n
         pts = _grid_points(a, b)
+        net_points.setdefault(n, set()).update(pts)
         for i, pnt in enumerate(pts):
             if i in (0, len(pts) - 1):
                 R.owner[pnt] = key
@@ -256,6 +262,7 @@ def _router_for(sch: Schematic, allow_nets: set):
             R.edges[frozenset((p1, p2))] = key
     for p, name, *_ in sch.nets():
         R.owner.setdefault(tuple(p), "__lbl_" + name)
+    R.net_points = net_points
     return R, MERGE, pin_net
 
 
@@ -276,14 +283,18 @@ def connect(sch: Schematic, frm, to) -> dict:
     pa, da = resolve_point(sch, frm)
     pb, db = resolve_point(sch, to)
     conn = extract(sch)
-    nets = set()
+    net_of = {}
     for tgt in (frm, to):
         if isinstance(tgt, str):
             ref, pin = tgt.split(".", 1)
             for d in conn["pins"].get(sch.component(ref).refdes, []):
                 if d["pin"].lower() == pin.lower() or str(d["index"] + 1) == pin:
-                    nets.add(d["net"])
-    # nets that are only a lone pin get auto names; still merge
+                    net_of[tgt] = d["net"]
+    nets = set(net_of.values())
+    na, nb = net_of.get(frm), net_of.get(to)
+    if na is not None and na == nb and len(conn["nets"].get(na, [])) > 1:
+        return {"points": [], "segments": 0, "length": 0,
+                "note": f"{frm} and {to} are already connected (net {na}); nothing drawn"}
     R, MERGE, pin_net = _router_for(sch, nets)
     for p in (pa, pb):
         if p not in R.pins:
@@ -291,7 +302,13 @@ def connect(sch: Schematic, frm, to) -> dict:
                 raise ValueError(f"point {p} is inside a component body")
             R.owner[p] = MERGE
     targets = {pb: ("pin", db)}
-    # also allow joining anywhere on the destination's existing wiring
+    # join the destination net anywhere along its existing wiring (a clean T),
+    # never retracing it; the source net's own wiring is not a target
+    if nb is not None:
+        src_pts = R.net_points.get(na, set()) if na is not None else set()
+        for q in R.net_points.get(nb, set()):
+            if q != pb and q not in src_pts and q not in R.cross and q not in R.pins:
+                targets[q] = ("tree", None)
     path, cost = R._search(MERGE, Terminal("from", pa, da), targets, max_expand=200000)
     if path is None:
         raise RuntimeError("no clean route found (blocked). Try moving parts apart, or use add_net_label on both ends.")
@@ -306,16 +323,107 @@ def connect(sch: Schematic, frm, to) -> dict:
     return {"points": [list(p) for p in corners], "segments": n, "length": sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(corners, corners[1:]))}
 
 
+def _free_stub_dirs(sch: Schematic, p, stub: int) -> list[str]:
+    """Directions in which a `stub`-long wire from p runs over nothing (no wire,
+    no part, no pin, no label)."""
+    from .scene import build
+    sc = build(sch)
+    busy = set()
+    for q in sc.parts:
+        busy |= q.keepout
+        busy |= {pp.pos for pp in q.pins}
+    for a, b, _ in sch.wires():
+        busy |= set(_grid_points(tuple(a), tuple(b)))
+    busy |= {tuple(l.pos) for l in sc.labels}
+    out = []
+    for k, v in DIRS.items():
+        pts = [(p[0] + v[0] * G * i, p[1] + v[1] * G * i) for i in range(1, max(1, stub) + 1)]
+        if not any(q in busy for q in pts):
+            out.append(k)
+    return out
+
+
+def _add_ground_smart(sch: Schematic, p, d, stub: int) -> dict:
+    """Ground symbol that always points DOWN: straight down from a downward pin,
+    otherwise an L-shaped stub (out of the pin, then down)."""
+    free = _free_stub_dirs(sch, p, 1)
+    sc_busy = None
+
+    def ok(pts):
+        nonlocal sc_busy
+        if sc_busy is None:
+            from .scene import build
+            sc = build(sch)
+            sc_busy = set()
+            for q in sc.parts:
+                sc_busy |= q.keepout
+                sc_busy |= {pp.pos for pp in q.pins}
+            for a, b, _ in sch.wires():
+                sc_busy |= set(_grid_points(tuple(a), tuple(b)))
+            sc_busy |= {tuple(l.pos) for l in sc.labels}
+        return not any(q in sc_busy for q in pts)
+
+    def finish(pts):
+        for a, b in zip(pts, pts[1:]):
+            sch.add_wire(a, b, "GND")
+        sch.add_net_label(pts[-1], "GND", _DIR_JUST["D"], port=False)
+        split_wires_at_tees(sch)
+        refresh_junctions(sch)
+        return {"label": "GND", "x": pts[-1][0], "y": pts[-1][1], "direction": "D", "path": [list(q) for q in pts]}
+
+    if not stub:
+        return finish([p])
+    down1 = (p[0], p[1] - G)
+    if d in (None, "D") and "D" in free:
+        return finish([p, down1])
+    for h in ([d] if d in ("L", "R") else []) + ["R", "L"]:
+        out = (p[0] + DIRS[h][0] * G, p[1])
+        dn = (out[0], out[1] - G)
+        if ok([out, dn]):
+            return finish([p, out, dn])
+    if d == "U":
+        for h in ("R", "L"):
+            up = (p[0], p[1] + G)
+            out = (up[0] + DIRS[h][0] * G, up[1])
+            dn = (out[0], p[1])
+            if ok([up, out, dn]):
+                return finish([p, up, out, dn])
+    if "D" in free:
+        return finish([p, down1])
+    return finish([p])
+
+
 def add_label(sch: Schematic, at, name: str, direction: str | None = None, port: bool = False,
               stub: int = 0) -> dict:
     p, d = resolve_point(sch, at)
+    is_gnd = name.upper() in ("GND", "0")
+    # already on that net? (same-named label on the pin's net)
+    conn = extract(sch)
+    if isinstance(at, str) and not is_gnd:
+        ref, pin = at.split(".", 1)
+        c = sch.component(ref)
+        for dd in conn["pins"].get(c.refdes if c else ref, []):
+            if (dd["pin"].lower() == pin.lower() or str(dd["index"] + 1) == pin) and \
+                    str(dd["net"]).lower() == name.lower():
+                return {"label": name, "note": f"{at} is already on net '{name}'; nothing added"}
+    explicit = direction is not None
     direction = (direction or d or "U").upper()[:1]
     if direction not in DIRS:
         direction = "U"
+    if is_gnd and not explicit:
+        return _add_ground_smart(sch, p, d, stub)
+    if stub and not explicit:
+        free = _free_stub_dirs(sch, p, stub)
+        if direction not in free:
+            pref = [x for x in ([d] if d else []) + ["U", "R", "L", "D"] if x in free]
+            if pref:
+                direction = pref[0]
+            else:
+                stub = 0          # nowhere to go: put the label right on the pin
     pt = p
     if stub:
         q = (p[0] + DIRS[direction][0] * G * stub, p[1] + DIRS[direction][1] * G * stub)
-        sch.add_wire(p, q, name if name.upper() != "GND" else "GND")
+        sch.add_wire(p, q, name if not is_gnd else "GND")
         pt = q
     sch.add_net_label(pt, name, _DIR_JUST[direction], port=port)
     split_wires_at_tees(sch)
@@ -422,6 +530,8 @@ def _relayout_texts(c: Component):
              pin_local=[pp.local for pp in pins], pin_optional=[bool(pp.default_net) for pp in pins],
              nets=["x"] * len(pins), value=c.value)
     req = [i for i in range(len(pins)) if not p.pin_optional[i]]
+    if not sym.name and not sym.type:
+        return  # hierarchical block keeps its layout
     if len(req) == 2 and len(pins) <= 3:
         p.kind = "2term"
     elif sym.type[:1] in ("Q", "M", "J", "Z"):

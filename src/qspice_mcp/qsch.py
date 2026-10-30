@@ -246,9 +246,9 @@ def xform(pt, code: int, origin=(0, 0)):
     for _ in range(rot):
         x, y = -y, x
     if e45:
-        import math
-        c = math.sqrt(0.5)
-        x, y = (x - y) * c, (x + y) * c
+        # QUX keeps 45-degree parts on the grid: (x - y, x + y), i.e. scaled by sqrt(2)
+        # (verified against QUX's netlist of Examples/1N4148.qsch)
+        x, y = x - y, x + y
     if mir:
         x = -x
     return (x + origin[0], y + origin[1])
@@ -260,9 +260,7 @@ def inv_xform(pt, code: int, origin=(0, 0)):
     if mir:
         x = -x
     if e45:
-        import math
-        c = math.sqrt(0.5)
-        x, y = (x + y) * c, (y - x) * c
+        x, y = (x + y) / 2, (y - x) / 2
     for _ in range(rot):
         x, y = y, -x
     return (x, y)

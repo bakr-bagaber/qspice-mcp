@@ -100,14 +100,16 @@ class SymbolLibrary:
         return qsyms, qschs
 
     def _signature(self, files) -> str:
+        # NOTE: must be stable across processes (str hash() is randomized)
+        import zlib
         h = 0
-        for p in files:
+        for p in sorted(files, key=str):
             try:
                 st = p.stat()
-                h ^= hash((str(p), int(st.st_mtime), st.st_size))
+                h = zlib.crc32(f"{p}|{int(st.st_mtime)}|{st.st_size}".encode("utf-8", "replace"), h)
             except OSError:
                 pass
-        return f"{len(files)}:{h & 0xFFFFFFFFFFFF:x}:v3"
+        return f"{len(files)}:{h:08x}:v4"
 
     def load(self, force: bool = False):
         if self._loaded and not force:
@@ -221,7 +223,20 @@ class SymbolLibrary:
         p = Path(name)
         if p.suffix.lower() == ".qsym" and p.exists():
             return self.add_qsym(p)
-        raise KeyError(f"unknown symbol '{name}'. Use list_symbols to browse the {len(self.entries)} available symbols.")
+        # a child schematic -> hierarchical block symbol
+        if p.suffix.lower() == ".qsch" and p.exists():
+            from .symbol_builder import block_for_child
+            node = block_for_child(p)
+            e = _entry(node, str(p))
+            e.name = p.stem
+            e.description = f"Hierarchical block (child schematic {p.name})"
+            return e
+        import difflib
+        close = difflib.get_close_matches(name, list(self.entries), n=5, cutoff=0.6)
+        close += [k for k in self.entries if low in k.lower() and k not in close][:5]
+        hint = f" Did you mean: {', '.join(close[:6])}?" if close else ""
+        raise KeyError(f"unknown symbol '{name}'.{hint} Use list_symbols to browse the {len(self.entries)} "
+                       f"available symbols, or create_symbol / symbol_from_subckt to make a new one.")
 
     def add_qsym(self, path) -> SymEntry:
         root = qsch.read_file(path)

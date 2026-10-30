@@ -65,13 +65,51 @@ def work_dir() -> Path:
     return p
 
 
+def _settings_file() -> Path:
+    return cache_dir() / "settings.json"
+
+
+def load_settings() -> dict:
+    import json
+    try:
+        return json.loads(_settings_file().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_settings(d: dict) -> None:
+    import json
+    _settings_file().write_text(json.dumps(d, indent=1), encoding="utf-8")
+
+
+def add_symbol_dir(path) -> list[str]:
+    p = str(Path(path).resolve())
+    s = load_settings()
+    dirs = s.get("symbol_dirs", [])
+    if p not in dirs:
+        dirs.append(p)
+    s["symbol_dirs"] = dirs
+    save_settings(s)
+    return dirs
+
+
 def extra_symbol_dirs() -> list[Path]:
     env = os.environ.get("QSPICE_SYMBOL_PATH", "")
     out = [Path(x) for x in env.split(os.pathsep) if x.strip()]
+    out += [Path(x) for x in load_settings().get("symbol_dirs", [])]
     docs = Path.home() / "Documents" / "QSPICE"
     if docs.exists():
         out.append(docs)
-    return out
+    mine = work_dir() / "symbols"
+    if mine.exists():
+        out.append(mine)
+    seen, uniq = set(), []
+    for p in out:
+        k = str(p).lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq
 
 
 def help_dir() -> Path:

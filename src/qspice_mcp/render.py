@@ -308,8 +308,38 @@ def draw_ground(cv: Canvas, p, just, col=INK):
     cv.poly([a, b, tip], col, None)
 
 
+def _annotate(cv: Canvas, sch: Schematic, mode: str):
+    """Print pin names and/or exact pin coordinates next to every used pin."""
+    from .scene import build
+    sc = build(sch, with_keepout=False)
+    off = {"U": (0, 1), "D": (0, -1), "L": (-1, 0), "R": (1, 0)}
+    col = (200, 0, 60)
+    for p in sc.parts:
+        for q in p.pins:
+            if q.optional and not q.net:
+                continue
+            X, Y = cv.P(q.pos)
+            r = max(3, cv.lw * 2)
+            cv.d.ellipse([X - r, Y - r, X + r, Y + r], outline=col, width=max(1, cv.lw // 2 + 1))
+            parts_ = []
+            if mode in ("pins", "full", "all"):
+                parts_.append(q.key)
+            if mode in ("coords", "full", "all"):
+                parts_.append(f"({q.pos[0]},{q.pos[1]})")
+            s = " ".join(parts_)
+            dx, dy = off.get(q.dir, (1, 0))
+            anchor = (q.pos[0] + dx * 45 + (0 if dx else 30), q.pos[1] + dy * 45 + (0 if dy else 30))
+            h = 1 if dx >= 0 else 2
+            v = 2 if dy >= 0 else 1
+            cv.text(anchor, s, 0.42, h, v, 0, col)
+        if mode in ("coords", "full", "all"):
+            cx, cy = p.pos
+            X, Y = cv.P((cx, cy))
+            cv.d.line([X - 4, Y, X + 4, Y], fill=(0, 140, 0)); cv.d.line([X, Y - 4, X, Y + 4], fill=(0, 140, 0))
+
+
 def render(sch: Schematic, width=1600, grid=False, show_pins=False, highlight: list[str] | None = None,
-           bbox=None) -> bytes:
+           bbox=None, annotate: str | None = None, marks: list | None = None) -> bytes:
     bb = bbox or schematic_bbox(sch)
     cv = Canvas(bb, width_px=width)
     if grid:
@@ -345,6 +375,16 @@ def render(sch: Schematic, width=1600, grid=False, show_pins=False, highlight: l
         h, v, r = (t["just"] >> 2) & 3, t["just"] & 3, (t["just"] >> 5) & 3
         cv.text(t["pos"], t["str"], t["size"], h or 1, v or 1, r,
                 DIRECTIVE if t["flag"] == 0 else COMMENT, mono=(t["flag"] == 0))
+    if annotate:
+        _annotate(cv, sch, annotate)
+    if marks:
+        for m in marks:
+            X, Y = cv.P(m["at"])
+            rr = max(8, cv.lw * 6)
+            col = {"error": (220, 0, 0), "warning": (230, 130, 0)}.get(m.get("severity"), (0, 120, 220))
+            cv.d.ellipse([X - rr, Y - rr, X + rr, Y + rr], outline=col, width=max(2, cv.lw))
+            if m.get("label"):
+                cv.text((m["at"][0] + 60, m["at"][1] + 60), m["label"], 0.5, 1, 2, 0, col)
     buf = io.BytesIO()
     cv.img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
@@ -370,13 +410,37 @@ def _grid(cv: Canvas, bb):
         gy += step
 
 
-def render_symbol(sym_node, width=500) -> bytes:
+def render_symbol(sym_node, width=600, annotate: bool = True) -> bytes:
+    """Symbol preview on a 100-unit grid.  Every pin is marked with
+    'order:NAME (x,y)' written outward from the pin; the origin (0,0) is the
+    green cross - that is the point you place with x/y."""
     from .model import Symbol
+    from .autodraw import _local_pin_dir
     s = Symbol(sym_node)
     x0, y0, x1, y1 = s.bbox(include_text=True)
-    cv = Canvas((x0 - 250, y0 - 250, x1 + 250, y1 + 250), width_px=width)
-    _grid(cv, (x0 - 250, y0 - 250, x1 + 250, y1 + 250))
-    draw_symbol(cv, sym_node, 0, (0, 0), show_pins=True, label_pins=True)
+    pad = 450 if annotate else 250
+    bb = (x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+    cv = Canvas(bb, width_px=width)
+    _grid(cv, bb)
+    draw_symbol(cv, sym_node, 0, (0, 0), show_pins=True, label_pins=not annotate)
+    if annotate:
+        X, Y = cv.P((0, 0))
+        cv.d.line([X - 7, Y, X + 7, Y], fill=(0, 150, 0), width=2)
+        cv.d.line([X, Y - 7, X, Y + 7], fill=(0, 150, 0), width=2)
+        off = {"U": (0, 1), "D": (0, -1), "L": (-1, 0), "R": (1, 0)}
+        for p in s.pins():
+            d = _local_pin_dir(sym_node, p.local, None)
+            dx, dy = off[d]
+            lab = f"{p.index + 1}:{p.name or '?'} ({p.local[0]},{p.local[1]})"
+            if p.default_net:
+                lab += " opt"
+            anchor = (p.local[0] + dx * 40, p.local[1] + dy * 40)
+            h = 1 if dx > 0 else 2 if dx < 0 else 3
+            v = 2 if dy > 0 else 1 if dy < 0 else 3
+            rot = 1 if dy != 0 else 0
+            if rot:   # vertical pins: write the label rotated along the lead
+                h, v = 3, (2 if dy > 0 else 1)
+            cv.text(anchor, lab, 0.55, h, v, rot, (200, 0, 60))
     buf = io.BytesIO()
     cv.img.save(buf, format="PNG")
     return buf.getvalue()

@@ -1,7 +1,8 @@
 [project]
 name = "qspice-mcp"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "MCP server for the QSPICE circuit simulator: simulation, waveforms, and LLM-friendly schematic drawing with review, symbols and skills"
+readme = "README.md"
 authors = [
     { name = "bagaber", email = "mail@bakrbagaber.com" }
 ]
@@ -15,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 qspice-mcp = "qspice_mcp:main"
+qmcp = "qspice_mcp.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
