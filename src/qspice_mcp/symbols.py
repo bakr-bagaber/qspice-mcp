@@ -233,6 +233,10 @@ class SymbolLibrary:
             return e
         import difflib
         close = difflib.get_close_matches(name, list(self.entries), n=5, cutoff=0.6)
+        for a in difflib.get_close_matches(low, list(ALIASES), n=3, cutoff=0.6):
+            tgt = ALIASES[a]
+            if tgt in self.entries and tgt not in close:
+                close.insert(0, f"{tgt} ({a})")
         close += [k for k in self.entries if low in k.lower() and k not in close][:5]
         hint = f" Did you mean: {', '.join(close[:6])}?" if close else ""
         raise KeyError(f"unknown symbol '{name}'.{hint} Use list_symbols to browse the {len(self.entries)} "

@@ -58,8 +58,18 @@ def get(name: str) -> str:
     return text
 
 
+SHORT = {"qspice-overview": "overview", "qspice-schematic-drafting": "drafting", "qspice-auto-draw": "auto-draw",
+         "qspice-canvas-editing": "canvas", "qspice-symbols": "symbols", "qspice-simulation": "simulation",
+         "qspice-waveforms": "waveforms", "qspice-models": "models", "qspice-netlist-import": "netlist-import",
+         "qspice-troubleshooting": "troubleshooting", "qspice-recipes": "recipes"}
+ORDER = list(SHORT)
+
+
 def index_text() -> str:
-    lines = ["QSPICE MCP guides (call qspice_guide with a name):", ""]
-    for d in info():
-        lines.append(f"- {d['name']}: {d['description']}")
+    lines = ["QSPICE MCP guides. Call qspice_guide('<short name>'), e.g. qspice_guide('drafting').",
+             "Read 'overview' first, 'drafting' before drawing, 'simulation' before simulating.", ""]
+    items = sorted(info(), key=lambda d: ORDER.index(d["name"]) if d["name"] in ORDER else 99)
+    for d in items:
+        short = SHORT.get(d["name"], d["name"])
+        lines.append(f"- {short}  ({d['name']}): {d['description']}")
     return "\n".join(lines)

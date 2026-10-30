@@ -103,9 +103,11 @@ circuits). Most circuits: default.
 | Bias point? | `.op` then `get_trace_data(path, ['V(b)','V(c)','I(R1)'])` |
 | Efficiency? | `.meas pin AVG -V(vin)*I(V1)` and `.meas pout AVG V(out)*I(R1)` -> pout/pin |
 
-Trace names: node voltage `V(out)`; differential `V(a,b)`; current through a two-terminal part `I(R1)`;
-transistor terminal currents `Ic(Q1)`, `Ib(Q1)`, `Id(M1)` (see `list_traces`). Op-amps named U1 are
-netlisted as `Ã´U1` - their currents appear under that name.
+Trace names: node voltage `V(out)` (only LABELLED nets have your names; unlabelled nets are `V(N03)` etc.);
+differential `V(a,b)`; current through a two-terminal part `I(R1)`; transistor terminal currents
+`Ic(Q1)`, `Ib(Q1)`, `Id(M1)`; inside a sub-circuit/sub-sheet `I(R1.X1)` (part R1 inside X1).
+Always check exact names with `list_traces`. Plots and `get_trace_data` also accept arithmetic of
+traces, e.g. `V(out)-V(in)`, `V(out)*I(R1)`, `mag(V(out))`.
 
 ## 8. Checklist before trusting a result
 

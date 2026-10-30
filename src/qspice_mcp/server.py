@@ -50,6 +50,47 @@ if an edit made things worse. Files go to the work folder unless an absolute pat
 mcp = MCPServer("qspice", instructions=INSTRUCTIONS)
 
 
+# The MCP SDK hides the text of any exception that is not a ToolError ("Error
+# executing tool X" only). Our error messages are written for the model (valid
+# pin names, "did you mean", files in the folder ...), so every tool converts its
+# exceptions into ToolErrors that carry the message.
+def _explain(e: Exception) -> str:
+    msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+    if isinstance(e, (ValueError, KeyError, FileNotFoundError, FileExistsError, RuntimeError,
+                      NotADirectoryError, PermissionError)):
+        return str(msg)
+    return f"{type(e).__name__}: {msg}"
+
+
+def _friendly(fn):
+    import functools
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        try:
+            return fn(*a, **k)
+        except ToolError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(_explain(e)) from e
+    return wrapper
+
+
+_sdk_tool = mcp.tool
+
+
+def _tool(*dargs, **dkw):
+    deco = _sdk_tool(*dargs, **dkw)
+
+    def apply(fn):
+        return deco(_friendly(fn))
+    return apply
+
+
+mcp.tool = _tool
+
+
 # ------------------------------------------------------------- helpers ----
 
 def _p(path: str | None, suffix: str | None = None, must_exist=False) -> Path:
@@ -118,23 +159,70 @@ def _render(sch: Schematic, width=1300, grid=False, annotate=None, marks=None, h
                          bbox=tuple(region) if region else None)
 
 
+def _pin_nets(sch: Schematic) -> dict:
+    conn = extract(sch)
+    return {f"{ref}.{d['pin']}": d["net"] for ref, lst in conn["pins"].items() for d in lst}
+
+
+def _conn_changes(before: dict, after: dict) -> list[str]:
+    """Human-readable list of nets that an edit split apart or shorted together
+    (pins of parts present before and after)."""
+    from collections import defaultdict
+    common = set(before) & set(after)
+    out = []
+    by_b = defaultdict(set)
+    for p in common:
+        by_b[before[p]].add(p)
+    for net, pins in by_b.items():
+        groups = defaultdict(list)
+        for p in pins:
+            groups[after[p]].append(p)
+        if len(pins) >= 2 and len(groups) > 1:
+            parts = " | ".join(", ".join(sorted(v)[:5]) for v in groups.values())
+            out.append(f"SPLIT: net '{net}' is now broken into {len(groups)} separate nets: {parts}")
+    by_a = defaultdict(set)
+    for p in common:
+        by_a[after[p]].add(p)
+    for net, pins in by_a.items():
+        groups = defaultdict(list)
+        for p in pins:
+            groups[before[p]].append(p)
+        real = {k: v for k, v in groups.items() if len(v) >= 2}
+        if len(real) > 1:
+            out.append(f"SHORT: nets {sorted(real)} are now connected together (net '{net}')")
+    return out
+
+
 def _edit(path, fn, show: bool = False, grid: bool = False, annotate: str | None = None) -> list:
-    """Load -> backup -> fn(sch) -> save -> review delta (+ picture)."""
+    """Load -> backup -> fn(sch) -> save -> review delta + connectivity check (+ picture)."""
     from .edit import issues_delta
     p = _p(path, ".qsch", must_exist=True)
     sch = Schematic.load(p)
     before = _review(sch)
+    try:
+        nets_before = _pin_nets(sch)
+    except Exception:
+        nets_before = None
     info = fn(sch) or {}
     _backup(p)
     sch.save(p)
     after = _review(sch)
     info = dict(info)
     info["file"] = str(p)
+    if nets_before is not None:
+        try:
+            changes = _conn_changes(nets_before, _pin_nets(sch))
+        except Exception:
+            changes = []
+        if changes:
+            info["connectivity_changes"] = changes
+            info["hint"] = ("CHECK: this edit changed which pins are connected (see connectivity_changes). "
+                            "If that was not intended, call undo_last_edit now.")
     if after.get("score") is not None and before.get("score") is not None:
         d = issues_delta(before, after)
         d["score_before"] = before["score"]
         info["review"] = d
-        if d["new_problems"]:
+        if d["new_problems"] and "hint" not in info:
             info["hint"] = ("This edit introduced problems (see review.new_problems). Fix them or call "
                             "undo_last_edit.")
     out: list = [_js(info)]
@@ -185,6 +273,7 @@ def qspice_info() -> str:
     d = runner.version()
     d["server_version"] = __version__
     d["work_dir"] = str(work_dir())
+    d["symbols_dir"] = str(work_dir() / "symbols")
     try:
         d["symbols"] = len(library().entries)
     except Exception as e:
@@ -540,8 +629,13 @@ def measure(path: str, statements: list[str]) -> str:
     '.meas ac f3db WHEN mag(V(out))=0.707', '.four 1K V(out)'].
     path: the simulated schematic/netlist or its .qraw."""
     raw = _qraw_for(path)
+    try:  # accept dotted hierarchical names (I(B1.X1)) for QSPICE's bullet-separated ones
+        names = [n for pl in qraw.read(raw) for n in pl.raw_names]
+        statements = [qraw.to_raw_names(s, names) for s in statements]
+    except Exception:
+        pass
     tmp = raw.with_name(raw.stem + "_meas.cir")
-    tmp.write_text("* measurements\n" + "\n".join(statements) + "\n.end\n", encoding="latin-1")
+    tmp.write_text("* measurements\n" + "\n".join(statements) + "\n.end\n", encoding="latin-1", errors="replace")
     res = runner.qpost(tmp, raw)
     return _js(res)
 
@@ -553,6 +647,12 @@ def plot_waveforms(path: str, traces: list[str], steps: list[int] | None = None,
     """Plot traces of a result (transient/DC: value vs x; AC: Bode magnitude+phase;
     .step runs are overlaid). Returns a picture - look at it."""
     pl = qraw.read(_qraw_for(path))[plot_index]
+    for t in traces:
+        try:
+            pl.trace(t, 1)
+        except Exception as e:
+            raise ValueError(f"cannot plot '{t}' ({e}). Use trace names from list_traces (e.g. V(out), I(R1)) "
+                             f"or arithmetic of them (V(out)-V(in), mag(V(out))). Available: {pl.names[:40]}")
     xl = (x_min, x_max) if x_min is not None or x_max is not None else None
     png = plots.plot_traces(pl, traces, steps, title, xl, separate_panes)
     out: list = []
@@ -645,7 +745,10 @@ def review_schematic(path: str, intended: dict | None = None, show: bool = True,
     extra junction dots, crossings, off-grid/diagonal wires), placement (overlapping
     or crowded parts, flow right-to-left, sources upside down, ground not pointing
     down) and text (overlapping/far-away refdes and values, text on wires).
-    intended: optional {ref: {pin: net}} to also verify the connections are right.
+    intended: optional {ref: {pin: net}} to also verify the connections are right, e.g.
+      {"R1": {"1": "in", "2": "out"}, "C1": {"1": "out", "2": "0"}} - pins that should share a net
+      must be connected, different nets must not touch, and labelled nets must carry the given name
+      (issues NET_SPLIT / NET_SHORT / WRONG_NET / MISSING_PART / UNKNOWN_PIN).
     Loop: review -> fix (follow 'fix') -> review again, until score >= 90 and 0 errors.
     The picture circles each issue with its number (red = error, orange = warning)."""
     from .review import review
@@ -726,9 +829,20 @@ def validate_schematic(path: str) -> str:
 # ===================================================== schematic: create ===
 
 def _draw_result(res: dict, sch: Schematic, show: bool) -> list:
+    res.pop("attempt_scores", None)          # internal layout costs - not meaningful to users
     v = res.get("validation", {})
     if "netlist" in v and len(v["netlist"]) > 4000:
         v["netlist"] = v["netlist"][:4000] + "\n..."
+    # names the simulator will use for nets that are not labelled on the sheet
+    nm = v.pop("net_map", None) or {}
+    renamed = {k: str(a).upper() if str(a).lower().startswith("n") and str(a)[1:].isdigit() else a
+               for k, a in nm.items() if str(a).lower() != str(k).lower() and k != "0"}
+    if renamed:
+        res["unlabelled_nets"] = {
+            "simulation_names": renamed,
+            "note": ("These spec nets are not labelled on the sheet, so QSPICE gives them automatic names "
+                     "(use V(N03) etc. in plots/.meas), or label them: add_net_label(at='<REF.PIN>', name='<net>') "
+                     "or list them in the spec's label_nets.")}
     rv = res.get("review") or {}
     if rv.get("score") is not None:
         res["next"] = ("Look at the picture. " + ("Score >= 90: good. " if rv["score"] >= 90 else
@@ -795,6 +909,44 @@ def netlist_to_schematic(netlist_text: str | None = None, netlist_path: str | No
     return r
 
 
+def _rail_names(sch: Schematic, conn: dict) -> dict:
+    """Meaningful names for unnamed supply nets (a DC source between the net and
+    ground): 'vcc' / 'vee' (or 'v12', 'vn5' when there are several)."""
+    from .autodraw import AUTO_NET
+    labels = {n.lower() for _, n, _, _ in sch.nets()}
+    rails = []
+    for c in sch.components():
+        if c.symbol.type != "V":
+            continue
+        pins = {d["pin"]: d["net"] for d in conn["pins"].get(c.refdes, [])}
+        plus, minus = pins.get("+"), pins.get("-")
+        val = c.value.strip().split()
+        if not val or val[0].upper() in ("SINE", "SIN", "PULSE", "PWL", "AC", "EXP", "SFFM"):
+            continue
+        try:
+            v = float(re.sub(r"[^0-9.eE+-].*$", "", val[-1] if val[0].upper() == "DC" else val[0]) or "nan")
+        except ValueError:
+            continue
+        if minus == "0" and plus and AUTO_NET.match(plus) and plus.lower() not in labels:
+            rails.append((plus, v))
+        elif plus == "0" and minus and AUTO_NET.match(minus) and minus.lower() not in labels:
+            rails.append((minus, -v))
+    out, used = {}, set(labels) | {n.lower() for n in conn["nets"]}
+    for net, v in rails:
+        if net in out:
+            continue
+        base = "vcc" if v >= 0 else "vee"
+        if base in used or sum(1 for _, w in rails if (w >= 0) == (v >= 0)) > 1:
+            mag = f"{abs(v):g}".replace(".", "v")
+            base = ("v" if v >= 0 else "vn") + mag
+        name, k = base, 2
+        while name in used:
+            name = f"{base}_{k}"; k += 1
+        used.add(name)
+        out[net] = name
+    return out
+
+
 @mcp.tool()
 def beautify_schematic(path: str, out_path: str | None = None, options: dict | None = None, show: bool = True) -> list:
     """Re-draw a messy schematic from scratch: keeps every component, value, symbol,
@@ -804,6 +956,7 @@ def beautify_schematic(path: str, out_path: str | None = None, options: dict | N
     src = _p(path, ".qsch", must_exist=True)
     sch = Schematic.load(src)
     conn = extract(sch)
+    rename = _rail_names(sch, conn)
     comps = []
     for c in sch.components():
         sym = c.symbol
@@ -813,7 +966,8 @@ def beautify_schematic(path: str, out_path: str | None = None, options: dict | N
             if sym.pins()[d["index"]].default_net and d["net"].startswith("N") and \
                     len(conn["nets"].get(d["net"], [])) <= 1:
                 continue
-            pmap[names[d["index"]] if names.count(names[d["index"]]) == 1 else str(d["index"] + 1)] = d["net"]
+            pmap[names[d["index"]] if names.count(names[d["index"]]) == 1 else str(d["index"] + 1)] = \
+                rename.get(d["net"], d["net"])
         comps.append({"ref": c.refdes, "symbol": sym.name, "_symbol_node": sym.node, "value": c.value,
                       "attributes": [], "pins": pmap})
     spec = {"components": comps, "directives": sch.directives(), "options": options or {}}
@@ -932,7 +1086,14 @@ def delete_items(path: str, refs: list[str] | None = None, wires_at: list[list[i
 
 def _connect(sch, a, b):
     if isinstance(b, str) and "." not in b:
-        return canvas.add_label(sch, a, "GND" if b.upper() in ("GND", "0", "GROUND") else b, None, False, 1)
+        gnd = b.upper() in ("GND", "0", "GROUND")
+        known = gnd or any(n.lower() == b.lower() for _, n, _, _ in sch.nets()) or \
+            any(n.lower() == b.lower() for n in extract(sch)["nets"])
+        r = canvas.add_label(sch, a, "GND" if gnd else b, None, False, 1)
+        if not known:
+            r["note"] = (f"net '{b}' did not exist before: {a} now starts a NEW net with that name. To join an "
+                         f"existing node, connect to one of its pins instead (e.g. to='C1.1').")
+        return r
     return canvas.connect(sch, a, b)
 
 

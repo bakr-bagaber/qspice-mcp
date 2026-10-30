@@ -283,7 +283,9 @@ def review(sch: Schematic, scene: Scene | None = None, intended: dict | None = N
     order = {"error": 0, "warning": 1, "style": 2}
     I.items.sort(key=lambda d: order[d["severity"]])
     counts = {s: sum(1 for d in I.items if d["severity"] == s) for s in ("error", "warning", "style")}
-    stats = {"parts": len(parts), "nets": len(sc.conn["nets"]), "wires": len(wires),
+    label_names = {l.name.lower() for l in sc.labels}
+    real_nets = [n for n, pins in sc.conn["nets"].items() if len(pins) >= 2 or n.lower() in label_names]
+    stats = {"parts": len(parts), "nets": len(real_nets), "wires": len(wires),
              "wire_length": sum(abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b, _ in wires),
              "crossings": len(crossings), "labels": len(sc.labels),
              "extent": _fmt_box(sc.bbox)}
@@ -333,6 +335,11 @@ def _check_intended(sc: Scene, intended: dict, I: Issues):
                       at=q.pos, refs=[ref])
             elif a in back and back[a] != n:
                 I.add("error", "NET_SHORT", f"{ref}.{pin} (net '{net}') is wrongly connected to net '{back[a]}'",
+                      at=q.pos, refs=[ref])
+            elif q.net and not re.fullmatch(r"n\d+", q.net.lower()) and q.net.lower() != n and \
+                    not re.fullmatch(r"n\d+", n):
+                # the pin sits on a NAMED net (label) whose name differs from the intended one
+                I.add("error", "WRONG_NET", f"{ref}.{pin} is on net '{q.net}', but should be on '{net}'",
                       at=q.pos, refs=[ref])
             fwd.setdefault(n, a); back.setdefault(a, n)
 

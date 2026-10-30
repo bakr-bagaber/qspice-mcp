@@ -41,12 +41,38 @@ def parse_args(argv: list[str]) -> dict:
     out = {}
     for a in argv:
         if "=" not in a:
-            raise SystemExit(f"cannot parse argument '{a}': use key=value, a JSON dict, or @file.json")
+            raise SystemExit(f"cannot parse argument '{a}': use key=value, a JSON dict, or a .json file")
         k, v = a.split("=", 1)
         try:
             out[k] = json.loads(v)
         except json.JSONDecodeError:
-            out[k] = v
+            out[k] = _loose_list(v) if v.strip().startswith("[") and v.strip().endswith("]") else v
+    return out
+
+
+def _loose_list(s: str) -> list:
+    """'[V(out),V(in)]' or '[a, b]' (quotes eaten by the shell) -> ['V(out)', 'V(in)']."""
+    inner = s.strip()[1:-1]
+    items, depth, cur = [], 0, ""
+    for ch in inner:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        items.append(cur)
+    out = []
+    for it in items:
+        t = it.strip().strip("'\"")
+        try:
+            out.append(json.loads(t) if re.fullmatch(r"-?\d+(\.\d+)?", t) else t)
+        except json.JSONDecodeError:
+            out.append(t)
     return out
 
 
@@ -82,13 +108,28 @@ async def _call(name: str, args: dict) -> int:
     content = getattr(res, "content", None) or []
     n = 0
     stamp = time.strftime("%H%M%S")
+    # keep pictures next to the file the tool worked on (…/images/), else in the work folder
+    img_dir = _img_dir()
+    stem = ""
+    target = args.get("path") or args.get("out_path") or args.get("folder")
+    if isinstance(target, str) and target.strip():
+        try:
+            from .server import _p
+            tp = _p(target)
+            base = tp if tp.is_dir() else tp.parent
+            if base.exists():
+                img_dir = base / "images"
+                img_dir.mkdir(exist_ok=True)
+                stem = (tp.stem + "_") if not tp.is_dir() else ""
+        except Exception:
+            pass
     for c in content:
         typ = getattr(c, "type", "")
         if typ == "text":
             print(c.text)
         elif typ == "image":
             n += 1
-            p = _img_dir() / f"{stamp}_{name}_{n}.png"
+            p = img_dir / f"{stem}{name}_{stamp}_{n}.png"
             p.write_bytes(base64.b64decode(c.data))
             print(f"[image saved: {p}]")
     if getattr(res, "is_error", False):

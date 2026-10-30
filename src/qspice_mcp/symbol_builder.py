@@ -207,6 +207,11 @@ def _block(spec):
         v_at, v_j, step = (-hw, -hh - 40), 5, -150
     elif clear(bot_xs, hw - vw, hw):
         v_at, v_j, step = (hw, -hh - 40), 9, -150
+    elif bot_xs and max(bot_xs) + 60 + vw <= hw + lead + 200:
+        # below the body, just right of the bottom leads (may extend past the corner)
+        v_at, v_j, step = (max(bot_xs) + 60, -hh - 40), 5, -150
+    elif bot_xs and min(bot_xs) - 60 - vw >= -hw - lead - 200:
+        v_at, v_j, step = (min(bot_xs) - 60, -hh - 40), 9, -150
     elif ref_side == "L" and clear(top_xs, hw - vw, hw) and -hw + rw + 100 < hw - vw:
         v_at, v_j, step = (hw, hh + 40 + 150 * len(attrs)), 10, -150
     else:
@@ -342,6 +347,7 @@ def _custom(spec):
     OUTER end of the lead; a lead line of length `lead` is drawn inward."""
     warn = []
     name, typ, ch = _header(spec, "X")
+    deco_texts = []
     for g in spec.get("graphics") or []:
         if "line" in g:
             a, b = g["line"]
@@ -366,8 +372,9 @@ def _custom(spec):
             a, b, c = g["arc"]
             ch.append(Node(f"arc3p {_pt(*a)} {_pt(*b)} {_pt(*c)} 0 0 0x1000000 -1 -1"))
         elif "text" in g:
+            # decorative text (flag 1 = not netlisted); must come AFTER refdes/value/attributes
             align = {"left": 7, "right": 11, "center": 15}.get(g.get("align", "center"), 15)
-            ch.append(_text(g.get("at", (0, 0)), g["text"], g.get("size", 0.8), align, 1))
+            deco_texts.append(_text(g.get("at", (0, 0)), g["text"], g.get("size", 0.8), align, 1))
         else:
             warn.append(f"unknown graphics item {list(g)[:1]}")
     pins = _norm_pins(spec.get("pins"), warn)
@@ -377,6 +384,7 @@ def _custom(spec):
     ch.append(_text(valpos, spec.get("model") or spec.get("value") or name, 1, 7))
     for k, attr in enumerate(spec.get("attributes") or []):
         ch.append(_text((valpos[0], valpos[1] - (k + 1) * 150), attr, 0.8, 7))
+    ch += deco_texts
     for p in pins:
         if "x" not in p or "y" not in p:
             raise ValueError(f"custom pin {p['name']} needs x and y")
@@ -390,7 +398,7 @@ def _custom(spec):
             inner = (x - vx * lead, y - vy * lead)
             if lead:
                 ch.append(_line((x, y), inner))
-        show = p.get("show_name", False)
+        show = p.get("show_name", True)
         if show and d:
             vx, vy = DIR_VEC[d]
             off = (-vx * (lead + 40), -vy * (lead + 40))
@@ -454,7 +462,9 @@ def describe(node: Node) -> dict:
     texts = []
     for k, t in enumerate(s.texts()):
         tk = t.tokens
-        texts.append({"index": k, "role": "refdes" if k == 0 else "value" if k == 1 else "attribute",
+        role = "refdes" if k == 0 else "value" if k == 1 else \
+            ("decoration (not netlisted)" if str(tk[4]) == "1" else "hidden" if str(tk[4]) == "2" else "attribute")
+        texts.append({"index": k, "role": role,
                       "text": qsch.display(text_string(t)), "at": list(tk[1]), "size": tk[2]})
     graphics = [c.header for c in node.children if c.kind in ("line", "rect", "ellipse", "triangle", "zigzag", "coil", "arc", "arc3p")]
     return {"name": s.name, "type": s.type, "description": s.description, "library": s.library,

@@ -29,6 +29,13 @@ Three ways to "see" (use all three when a sheet is new to you):
 
 Every editing tool saves the file, keeps an undo history and returns a `review` delta:
 `score`, `score_before`, `errors`, `warnings`, `new_problems`. Read it after each call.
+If an edit changed which pins are connected, the result also contains `connectivity_changes`
+(`SPLIT: net 'out' is now broken into 2 separate nets ...` or `SHORT: nets [...] are now connected
+together`). Unless you meant to do exactly that, call `undo_last_edit` immediately.
+
+Net names: only nets with a **label** have a name in the simulation. An unlabelled net gets an
+automatic name like `N03` (shown by `read_schematic` / `netlist_schematic`). Before using `V(mid)` in a
+plot or `.meas`, make sure a label `mid` exists (`add_net_label`).
 
 | Tool | Use for | Example |
 |---|---|---|
@@ -40,7 +47,7 @@ Every editing tool saves the file, keeps an undo history and returns a `review` 
 | `add_ground` | ground symbol (points down) | `add_ground(path, at='C1.2')` |
 | `move_component` | move/rotate, wires follow | `move_component(path, ref='R3', dx=300)` |
 | `update_component` | value / params / rename | `update_component(path, ref='R1', value='4.7K')` |
-| `delete_items` | delete parts, wires, labels | `delete_items(path, refs=['R5'])`, `wires_at=[[x,y]]`, `labels_at=[[x,y]]` |
+| `delete_items` | delete parts, wires, labels | `delete_items(path, refs=['R5'])`, `wires_at=[[x,y]]` (a point in the MIDDLE of a segment deletes only that segment; a corner/junction point deletes every segment ending there), `labels_at=[[x,y]]` (also removes the label's stub) |
 | `add_wire` | explicit polyline (rarely needed) | `add_wire(path, points=[[0,0],[0,400],[600,400]])` |
 | `set_directives` | analysis/model/meas commands | `set_directives(path, ['.tran 10m', '.meas vmax MAX V(out)'])` |
 | `add_comment` | a note or title | `add_comment(path, 'Bias network', x=-400, y=1200)` |

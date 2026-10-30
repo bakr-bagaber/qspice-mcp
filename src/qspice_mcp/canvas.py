@@ -85,7 +85,7 @@ def place_component(sch: Schematic, symbol: str, x, y, ref: str | None = None, v
         ref = f"{letter}{k}"
     notes = []
     if letter and not ref.upper().startswith(letter.upper()):
-        notes.append(f"{ref} is netlisted as {letter}\u00b4{ref} (device letter '{letter}')")
+        notes.append(f"{ref}: fine as is (QSPICE internally prefixes its device letter; node voltages are unaffected)")
     if ref.lower() in existing:
         raise ValueError(f"reference designator {ref} already exists")
     p = Part(ref=ref, sym_name=sym.name, node=node, pin_names=[pp.name or str(pp.index + 1) for pp in pins],
@@ -441,14 +441,34 @@ def delete(sch: Schematic, refs=(), wires_touching=(), labels_at=(), remove_dang
         pinpts += [tuple(w) for _, w in c.pin_positions()]
         sch.remove(c.node)
         removed["components"].append(c.refdes)
-    for w in sch.root.findall("wire"):
-        t = w.tokens
-        a, b = tuple(t[1]), tuple(t[2])
-        if any(_on_seg((snap(x), snap(y)), a, b) for x, y in wires_touching):
+    removed["removed_wires"] = []
+    for x, y in wires_touching:
+        q = (snap(x), snap(y))
+        ws = [(w, tuple(w.tokens[1]), tuple(w.tokens[2])) for w in sch.root.findall("wire")]
+        # a point INSIDE a segment selects just that segment; a corner/junction point
+        # (segment end) selects the segments ending there
+        inner = [w for w, a, b in ws if _on_seg(q, a, b) and q not in (a, b)]
+        hit = inner or [w for w, a, b in ws if q in (a, b)]
+        for w in hit:
+            removed["removed_wires"].append([list(w.tokens[1]), list(w.tokens[2])])
             sch.remove(w); removed["wires"] += 1
+    label_pts = []
     for n in sch.root.findall("net"):
         if any(tuple(n.tokens[1]) == (snap(x), snap(y)) for x, y in labels_at):
+            label_pts.append(tuple(n.tokens[1]))
             sch.remove(n); removed["labels"] += 1
+    # a label's stub wire would dangle without its label: remove it too
+    if label_pts:
+        pin_pts = {tuple(w) for c in sch.components() for _, w in c.pin_positions()}
+        for lp in label_pts:
+            ws = [(w, tuple(w.tokens[1]), tuple(w.tokens[2])) for w in sch.root.findall("wire")]
+            ends = [w for w, a, b in ws if lp in (a, b)]
+            others = [w for w, a, b in ws if _on_seg(lp, a, b) and lp not in (a, b)]
+            if len(ends) == 1 and not others and lp not in pin_pts and \
+                    not any(tuple(p) == lp for p, *_ in sch.nets()):
+                w = ends[0]
+                removed["removed_wires"].append([list(w.tokens[1]), list(w.tokens[2])])
+                sch.remove(w); removed["wires"] += 1
     if remove_dangling and pinpts:
         # drop wire stubs that now dangle from the removed pins
         changed = True
@@ -463,6 +483,7 @@ def delete(sch: Schematic, refs=(), wires_touching=(), labels_at=(), remove_dang
                                   _on_seg(e, tuple(x.tokens[1]), tuple(x.tokens[2]))]
                         on_lbl = any(tuple(p) == e for p, *_ in sch.nets())
                         if not others and not on_lbl:
+                            removed["removed_wires"].append([list(a), list(b)])
                             sch.remove(w); removed["wires"] += 1
                             other = b if e == a else a
                             pinpts.append(other)
@@ -477,7 +498,8 @@ def delete(sch: Schematic, refs=(), wires_touching=(), labels_at=(), remove_dang
                     live.update(tuple(w_) for _, w_ in c.pin_positions())
                 pinpts = [p for p in pinpts if p not in live]
     refresh_junctions(sch)
-    return removed
+    return {"removed_components": removed["components"], "removed_wire_segments": removed["removed_wires"],
+            "removed_labels": removed["labels"]}
 
 
 def update_component(sch: Schematic, ref: str, value=None, params: dict | None = None, new_ref=None,

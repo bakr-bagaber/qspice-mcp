@@ -14,6 +14,8 @@ from .scene import CHAR_W, LINE_H, Scene, boxes_overlap, build, seg_hits_box, te
 def _kind(p) -> str:
     req = [q for q in p.pins if not q.optional]
     t = p.type or ""
+    if not t and not getattr(p, "symbol", ""):
+        return "block"           # hierarchical sub-sheet block: texts live inside its box
     if len(req) == 2 and len(p.pins) <= 3:
         dirs = {q.dir for q in req}
         return "v2" if dirs <= {"U", "D"} else "h2" if dirs <= {"L", "R"} else "v2"
@@ -31,8 +33,24 @@ def candidates(p) -> list[tuple[str, float, list]]:
     kind = _kind(p)
     texts = _movable_texts(p)
     n = len(texts)
-    if n == 0 or kind == "block":
+    if n == 0:
         return []
+    if kind == "block":
+        # designed symbol texts (op-amps, switches, ICs) move only as a rigid group,
+        # and only when they collide with something
+        from .qsch import screen_just
+        if any(int(t.node.tokens[3]) & 0x60 for t in texts):
+            return []
+        base = []
+        for t in texts:
+            hh, vv, _ = screen_just(int(t.node.tokens[3]), p.comp.code)
+            base.append((tuple(t.anchor), hh, vv))
+        out = [("keep", 0.0, base)]
+        for (dx, dy), pref in [((100, 0), 1.0), ((-100, 0), 1.0), ((0, 100), 1.0), ((0, -100), 1.0),
+                               ((100, 100), 1.6), ((-100, 100), 1.6), ((100, -100), 1.6), ((-100, -100), 1.6),
+                               ((200, 0), 1.8), ((-200, 0), 1.8), ((0, 200), 1.8), ((0, -200), 1.8)]:
+            out.append((f"shift{dx:+d}{dy:+d}", pref, [((a[0] + dx, a[1] + dy), h, v) for a, h, v in base]))
+        return out
     b = p.body
     cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
     sizes = [_size(t) for t in texts]
@@ -88,11 +106,14 @@ def _boxes(p, layout):
 
 def _cost(boxes, p, sc: Scene, placed: list) -> float:
     c = 0.0
+    own_ok = _kind(p) == "block"     # designed texts may sit on their own symbol
     for bx in boxes:
         for a, b, _ in sc.wires:
             if seg_hits_box(a, b, bx, shrink=12):
                 c += 10
         for q in sc.parts:
+            if own_ok and q.ref == p.ref:
+                continue
             if boxes_overlap(_sh(bx, 10), _sh(q.body, 8)):
                 c += 14
         for ob in placed:
@@ -149,13 +170,14 @@ def optimize(sch: Schematic, refs: list[str] | None = None, passes: int = 2) -> 
             best = None
             for name, pref, lay in candidates(p):
                 bx = _boxes(p, lay)
-                c = _cost(bx, p, sc, pool) + pref
+                raw = _cost(bx, p, sc, pool)
+                c = raw + pref
                 if best is None or c < best[0]:
-                    best = (c, name, lay, bx)
+                    best = (c, name, lay, bx, raw)
             if best is None:
                 continue
             apply_layout(p.comp, p, best[2])
-            chosen[p.ref] = {"layout": best[1], "collisions": round(best[0], 1)}
+            chosen[p.ref] = {"layout": best[1], "clear": best[4] < .5}
             placed += best[3]
             changed = True
         if not changed:

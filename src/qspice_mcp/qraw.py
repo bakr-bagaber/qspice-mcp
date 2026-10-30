@@ -30,16 +30,22 @@ class Plot:
 
     @property
     def names(self) -> list[str]:
+        """Trace names as shown to users: QSPICE's hierarchy separator (a bullet,
+        byte 0x95) is written as '.', e.g. I(B1.X1) = current of B1 inside X1."""
+        return [display_name(v[0]) for v in self.variables]
+
+    @property
+    def raw_names(self) -> list[str]:
         return [v[0] for v in self.variables]
 
     def index(self, name: str) -> int:
-        n = name.strip()
+        n = display_name(name.strip()).lower()
         low = [x.lower() for x in self.names]
-        if n.lower() in low:
-            return low.index(n.lower())
+        if n in low:
+            return low.index(n)
         # V(node) shorthand: bare node name
-        if f"v({n.lower()})" in low:
-            return low.index(f"v({n.lower()})")
+        if f"v({n})" in low:
+            return low.index(f"v({n})")
         raise KeyError(name)
 
     @property
@@ -67,14 +73,79 @@ class Plot:
         return self.step_bounds[step - 1]
 
     def trace(self, expr: str, step: int | None = 1):
-        """Return samples for a variable name or simple V(a,b) / V(a)-V(b) expression."""
+        """Samples of a variable name, V(a,b), or an arithmetic expression of
+        traces such as 'V(out)-11.84', 'V(out)*I(R1)', 'mag(V(out))/mag(V(in))'."""
         a, b = self._bounds(step)
         m = re.fullmatch(r"\s*V\(\s*([^,()]+)\s*,\s*([^,()]+)\s*\)\s*", expr, re.I)
         if m:
             return self.trace(f"V({m.group(1)})", step) - self.trace(f"V({m.group(2)})", step)
         if expr.strip().lower() in ("v(0)", "v(gnd)"):
             return np.zeros(b - a)
-        return self.data[a:b, self.index(expr)]
+        try:
+            return self.data[a:b, self.index(expr)]
+        except KeyError:
+            if not re.search(r"[-+*/^]|\w\(", expr) or re.fullmatch(r"\s*\w+\([^()]*\)\s*", expr) and \
+                    expr.split("(")[0].strip().lower() not in _FUNCS:
+                raise
+            return self._eval(expr, step)
+
+    def _eval(self, expr: str, step):
+        if not re.fullmatch(r"[\w\s+\-*/^().,:#]*", expr):
+            raise KeyError(expr)
+        arrays = {}
+
+        def repl(m):
+            tok = m.group(0)
+            if tok.split("(")[0].strip().lower() in _FUNCS:
+                return tok
+            arr = self.trace(tok, step)
+            key = f"_t{len(arrays)}"
+            arrays[key] = arr
+            return key
+        s, prev = expr, None
+        while s != prev:
+            prev = s
+            s = re.sub(r"\b[A-Za-z][\w#]*\([^()]*\)", repl, s)
+        s = re.sub(r"(?<![\w.])(\d+\.?\d*|\.\d+)(?:e([+-]?\d+))?(meg|[fpnumkgt])?\b",
+                   lambda m: repr(float(m.group(1)) * (10 ** int(m.group(2)) if m.group(2) else 1)
+                                  * _SI.get((m.group(3) or "").lower(), 1)), s, flags=re.I)
+        s = s.replace("^", "**")
+        s = re.sub(r"\b([A-Za-z]\w*)\s*\(",
+                   lambda m: (m.group(1).lower() if m.group(1).lower() in _FUNCS else m.group(1)) + "(", s)
+        x = self.axis(step)
+        env = {"__builtins__": {}, "pi": np.pi, **_FUNCS, **arrays,
+               "time": x, "freq": x, "frequency": x}
+        for name in re.findall(r"[A-Za-z_]\w*", s):
+            if name not in env:
+                raise KeyError(f"{expr} (unknown name '{name}')")
+        return np.asarray(eval(s, env), dtype=complex if self.complex else float) * np.ones(len(x))
+
+
+HIER_SEP = "\x95"
+
+
+def display_name(s: str) -> str:
+    return s.replace(HIER_SEP, ".").replace("•", ".")
+
+
+def to_raw_names(text: str, raw_names: list[str]) -> str:
+    """Replace user-friendly dotted hierarchical trace names in .meas text by
+    QSPICE's own spelling (bullet separator)."""
+    for rn in raw_names:
+        if HIER_SEP in rn:
+            dn = display_name(rn)
+            text = re.sub(re.escape(dn), lambda m: rn, text, flags=re.I)
+    return text
+
+
+_SI = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "meg": 1e6, "g": 1e9, "t": 1e12}
+_FUNCS = {
+    "mag": np.abs, "abs": np.abs, "ph": lambda z: np.angle(z, deg=True), "phase": lambda z: np.angle(z, deg=True),
+    "re": np.real, "real": np.real, "im": np.imag, "imag": np.imag,
+    "db": lambda z: 20 * np.log10(np.abs(z) + 1e-300), "sqrt": np.sqrt, "log10": np.log10, "log": np.log,
+    "ln": np.log, "exp": np.exp, "sin": np.sin, "cos": np.cos, "tan": np.tan, "atan": np.arctan,
+    "pow": np.power, "min": np.minimum, "max": np.maximum, "sgn": np.sign, "sign": np.sign,
+}
 
 
 def _split_steps(x: np.ndarray) -> list[tuple[int, int]]:

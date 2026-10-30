@@ -200,7 +200,11 @@ def _target(sch: Schematic, sc, t):
         if q is None:
             find_pin(sch, s)  # raises a helpful error
         return {"kind": "pin", "pos": q.pos, "dir": q.dir, "net": q.net, "name": q.key}
-    return {"kind": "label", "name": s}
+    # a net name: where is that net already on the sheet (labels / pins)?
+    pts = [l.pos for l in sc.labels if l.name.lower() == s.lower()]
+    pts += [q.pos for p in sc.parts for q in p.pins if q.net and q.net.lower() == s.lower()]
+    where = (sum(x for x, _ in pts) / len(pts), sum(y for _, y in pts) / len(pts)) if pts else None
+    return {"kind": "label", "name": s, "where": where}
 
 
 def add_and_connect(sch: Schematic, symbol: str, connections: dict, value: str = "", ref: str | None = None,
@@ -240,6 +244,9 @@ def add_and_connect(sch: Schematic, symbol: str, connections: dict, value: str =
     text_boxes = [t.box for t in sc.texts]
     bodies = [p.body for p in sc.parts]
     anchors = [(i, t) for i, t in conns.items() if t["kind"] in ("pin", "point")]
+    if not anchors:
+        # only net names: stay close to where those nets already are
+        anchors = [(i, {"pos": t["where"]}) for i, t in conns.items() if t.get("where")]
     best = None
     tmp = Part(ref="__new", sym_name=sym.name, node=sym.node, pin_names=names,
                pin_local=[p.local for p in pins], pin_optional=[bool(p.default_net) for p in pins],
@@ -291,6 +298,10 @@ def add_and_connect(sch: Schematic, symbol: str, connections: dict, value: str =
             else:
                 add_label(sch, pin_spec, t["name"], None, False, 1)
                 wired.append({"pin": names[i], "to": f"label {t['name']}"})
+                if t.get("where") is None:
+                    vnotes.append(f"net '{t['name']}' did not exist on the sheet before: {pin_spec} now starts a NEW "
+                                  f"net with that name. If you meant an existing node, connect to one of its pins "
+                                  f"(e.g. 'C1.1') instead.")
         except Exception as ex:  # keep going, report
             problems.append(f"{pin_spec} -> {t.get('name') or t['kind']}: {ex}")
     split_wires_at_tees(sch)
@@ -404,12 +415,24 @@ def _score_candidate(p: Part, code, pos, conns, occ, wire_pts, bodies, text_boxe
                 cost += 400           # pin faces away from its target
             if t.get("dir"):
                 tx, ty = DIRS[t["dir"]]
-                if tx * (q[0] - tp[0]) + ty * (q[1] - tp[1]) <= 0:
-                    cost += 250       # we are behind the target pin
+                if tx * (q[0] - tp[0]) + ty * (q[1] - tp[1]) < 0:
+                    cost += 250       # we are behind the target pin (beside it is fine: a T joint)
         elif t["kind"] == "ground":
             cost += {"D": 0, "L": 600, "R": 600, "U": 900}[d]
+        elif re.match(r"^(v?cc|v?dd|vp|v\+|\+|\d+v)", t["name"], re.I):
+            cost += {"U": 0, "L": 100, "R": 100, "D": 200}[d]
+        elif re.match(r"^(v?ee|v?ss|vn|v-|-)", t["name"], re.I):
+            cost += {"D": 0, "L": 100, "R": 100, "U": 200}[d]
+        elif t.get("where"):
+            # an existing net elsewhere on the sheet: be near it and face toward it
+            wx, wy = t["where"]
+            cost += 0.7 * (abs(q[0] - wx) + abs(q[1] - wy))
+            vx, vy = DIRS[d]
+            if vx * (wx - q[0]) + vy * (wy - q[1]) < 0:
+                cost += 200
         else:
-            cost += {"U": 0, "L": 100, "R": 100, "D": 200}[d] if re.match(r"^(v?cc|v?dd|vp|v\+|\+)", t["name"], re.I) else 0
+            # a new signal net: the signal continues to the right
+            cost += {"R": 0, "U": 150, "D": 150, "L": 300}[d]
     if prefer_side and conns:
         anchors = [t["pos"] for t in conns.values() if t.get("pos")]
         if anchors:

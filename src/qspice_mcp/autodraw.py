@@ -144,8 +144,9 @@ def build_parts(spec: dict) -> tuple[list[Part], list[str]]:
             ref = f"{letter}{len(parts)+1}"
         if letter and not ref.upper().startswith(letter.upper()):
             # QUX prefixes the device letter itself: U1 -> Ã´U1 in the netlist
-            notes.append(f"{ref} is netlisted as {letter}\u00b4{ref} (QSPICE device letter '{letter}' for "
-                         f"{sym.description or sym.name}); use that name in I()/P() expressions")
+            notes.append(f"{ref}: fine as is. QSPICE internally prefixes the device letter of "
+                         f"{sym.description or sym.name} to this name; node voltages are unaffected "
+                         f"(after simulating, list_traces shows the exact current-trace names)")
         if ref.lower() in seen:
             raise ValueError(f"duplicate reference designator {ref}")
         seen.add(ref.lower())
@@ -563,7 +564,16 @@ def classify(parts: list[Part], spec: dict) -> dict[str, NetInfo]:
         nets[n].rank = rank.get(n, maxr + 1)
     for o in outputs:
         if o in nets and nets[o].kind == "signal":
-            nets[o].rank = max(nets[o].rank, maxr + 0.5)
+            # push the output to the far right - unless the signal continues past it
+            # (e.g. an 'out' node followed by a coupling cap and a load)
+            ro = nets[o].rank
+            downstream = False
+            for (i, j) in nets[o].pins:
+                for m in parts[i].nets:
+                    if m and m != o and m in sig and nets[m].rank > ro:
+                        downstream = True
+            if not downstream:
+                nets[o].rank = max(ro, maxr + 0.5)
     return nets
 
 
@@ -707,6 +717,14 @@ class Placer:
                 cost += {"D": 0, "L": 3, "R": 3, "U": 8}[d]
             elif k == "pos":
                 cost += {"U": 0, "L": 3, "R": 3, "D": 8}[d]
+        # a two-terminal part between rails/ground only (decoupling caps, bleeders)
+        # stands vertical: rail label on top, ground symbol below
+        if p.kind == "2term" and not src:
+            kinds = [self.nets[n].kind for n in p.nets if n]
+            if kinds and all(k != "signal" for k in kinds):
+                req = [j for j in range(p.npins) if not p.pin_optional[j]]
+                if any(g["dirs"][j] in ("L", "R") for j in req):
+                    cost += 6
         # flow: lower rank pins should face left
         sig = [(self.nets[n].rank, j) for j, n in enumerate(p.nets) if n and self.nets[n].kind == "signal"]
         if len(sig) >= 2:
@@ -785,7 +803,23 @@ class Placer:
         # stubs for ground/rails need free room: handled in overlap via pin zones
         return c
 
+    def env_abs(self, i):
+        """Union of everything pair_cost looks at for part i (body+margin, texts,
+        stub zones). Two parts whose envelopes don't touch cost nothing."""
+        p = self.parts[i]
+        key = ("env", i, p.pos, p.code)
+        r = self._memo.get(key)
+        if r is None:
+            rects = self.rect_abs(i, "body", 90) + self.rect_abs(i, "labels")
+            r = (min(q[0] for q in rects), min(q[1] for q in rects),
+                 max(q[2] for q in rects), max(q[3] for q in rects))
+            self._memo[key] = r
+        return r
+
     def pair_cost(self, i, j):
+        EA, EB = self.env_abs(i), self.env_abs(j)
+        if EA[2] <= EB[0] or EB[2] <= EA[0] or EA[3] <= EB[1] or EB[3] <= EA[1]:
+            return 0.0
         A = self.rect_abs(i, "body", 90)[0]
         B = self.rect_abs(j, "body", 90)[0]
         c = 0.0
@@ -1074,7 +1108,9 @@ def route_drawing(parts: list[Part], nets: dict[str, NetInfo], label_names: set[
             for gx in range(int(x0 // G * G), int(x1) + G, G):
                 for gy in range(int(y0 // G * G), int(y1) + G, G):
                     if x0 - 20 <= gx <= x1 + 20 and y0 - 20 <= gy <= y1 + 20:
-                        soft[(gx, gy)] = soft.get((gx, gy), 0) + 3
+                        # mild: texts are re-placed after routing, so a straight wire
+                        # through a text spot beats a detour around it
+                        soft[(gx, gy)] = soft.get((gx, gy), 0) + 1.2
     R = Router(bounds, blocked, pin_net, soft)
     # ---- stubs for ground / rails / single-pin labelled nets
     stub_list = []
@@ -1499,13 +1535,16 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
     label_names = set()
     if isinstance(policy, list):
         label_names = {_norm_net(n) for n in policy}
-        policy = "auto"
+        policy = "minimal"
     for n, ni in nets.items():
         if ni.kind != "signal":
             continue
-        if policy == "all" and not AUTO_NET.match(n):
+        # default ("auto"/"all"/"named"): every net the author gave a real name gets a
+        # label, so V(name) works in plots and .meas; "minimal": only in/out/fb/...
+        # and nets used in directives; "none": no extra labels
+        if policy in ("auto", "all", "named") and not AUTO_NET.match(n):
             label_names.add(n)
-        elif policy != "none" and (n.lower() in referenced or IO_NET.match(n)):
+        elif policy not in ("none",) and (n.lower() in referenced or IO_NET.match(n)):
             label_names.add(n)
     # hierarchical sheet: every port net gets a port label
     ports = [str(x) for x in (spec.get("ports") or [])]

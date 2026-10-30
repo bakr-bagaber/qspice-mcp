@@ -84,9 +84,13 @@ def extract(sch: Schematic) -> dict:
         groups[r].append(f"{ref}.{pname}")
     auto = 1
     out_pins = {}
+    taken = {str(n).lower() for n in names.values()}   # user label names are never reused
     for r in sorted(groups, key=lambda r: str(r)):
         if r not in names:
+            while f"n{auto:02d}" in taken:
+                auto += 1
             names[r] = f"N{auto:02d}"
+            taken.add(f"n{auto:02d}")
             auto += 1
     for (ref, pname, idx), r in pin_net.items():
         out_pins.setdefault(ref, []).append({"pin": pname, "index": idx, "net": names[r]})
