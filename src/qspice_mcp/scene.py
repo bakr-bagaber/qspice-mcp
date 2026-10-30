@@ -21,11 +21,35 @@ LINE_H = 1.2 * FONT          # 150 units per line
 G = 100
 
 
-def text_box(anchor, s: str, size: float = 1.0, h: int = 1, v: int = 3, rot: int = 0):
+# advance widths of a proportional sans font (Arial metrics, em units); texts in
+# QSPICE are drawn proportionally, directives in a fixed-pitch font
+_EM = {" ": .278, "!": .278, '"': .355, "#": .556, "$": .556, "%": .889, "&": .667, "'": .191,
+       "(": .333, ")": .333, "*": .389, "+": .584, ",": .278, "-": .333, ".": .278, "/": .278,
+       ":": .278, ";": .278, "<": .584, "=": .584, ">": .584, "?": .556, "@": 1.015, "[": .278,
+       "\\": .278, "]": .278, "^": .469, "_": .556, "`": .333, "{": .334, "|": .26, "}": .334,
+       "~": .584, "A": .667, "B": .667, "C": .722, "D": .722, "E": .667, "F": .611, "G": .778,
+       "H": .722, "I": .278, "J": .5, "K": .667, "L": .556, "M": .833, "N": .722, "O": .778,
+       "P": .667, "Q": .778, "R": .722, "S": .667, "T": .611, "U": .722, "V": .667, "W": .944,
+       "X": .667, "Y": .667, "Z": .611, "a": .556, "b": .556, "c": .5, "d": .556, "e": .556,
+       "f": .278, "g": .556, "h": .556, "i": .222, "j": .222, "k": .5, "l": .222, "m": .833,
+       "n": .556, "o": .556, "p": .556, "q": .556, "r": .333, "s": .5, "t": .278, "u": .556,
+       "v": .5, "w": .722, "x": .5, "y": .5, "z": .5}
+TEXT_SAFETY = 1.08            # proportional estimate + margin (font hinting, bold-ish GUI fonts)
+
+
+def text_width(line: str, size: float = 1.0, mono: bool = False) -> float:
+    """World width of one line of text."""
+    if mono:
+        return len(line) * CHAR_W * size
+    em = sum(_EM.get(ch, .556 if ch.isdigit() else .62) for ch in line)
+    return em * FONT * size * TEXT_SAFETY
+
+
+def text_box(anchor, s: str, size: float = 1.0, h: int = 1, v: int = 3, rot: int = 0, mono: bool = False):
     """Bounding box (x0, y0, x1, y1) of a text drawn like QUX/render.py."""
     s = qsch.display(s or "")
     lines = s.split("\n") if s else [""]
-    w = max(len(l) for l in lines) * CHAR_W * size
+    w = max(text_width(l, size, mono) for l in lines)
     hh = len(lines) * LINE_H * size
     if rot % 2:
         w, hh = hh, w
@@ -188,7 +212,8 @@ def build(sch: Schematic, with_keepout: bool = True) -> Scene:
         for _, w in c.pin_positions():
             all_pin_pts.add(tuple(w))
     texts = []
-    for c in comps:
+    from .connectivity import unique_refs
+    for c, rname in unique_refs(sch):
         sym = c.symbol
         node = sym.node
         pts = [xform(q, c.code, c.pos) for q in _graphic_points(node)]
@@ -199,13 +224,13 @@ def build(sch: Schematic, with_keepout: bool = True) -> Scene:
             body = (c.pos[0] - 100, c.pos[1] - 100, c.pos[0] + 100, c.pos[1] + 100)
         hull = _hull(pts) if pts else []
         ko = keepout_points(node, c.code, c.pos, all_pin_pts) if with_keepout else set()
-        pg = PartG(c.refdes, c, sym.name, sym.type, sym.description, c.code, tuple(c.pos), body, hull, ko,
+        pg = PartG(rname, c, sym.name, sym.type, sym.description, c.code, tuple(c.pos), body, hull, ko,
                    value=c.value)
         _shapes(pg, node, c.code, c.pos)
         for pi, w in c.pin_positions():
             d = _xf_dir(_local_pin_dir(node, pi.local, None), c.code)
-            pg.pins.append(PinG(c.refdes, pi.name or str(pi.index + 1), pi.index, tuple(w), d,
-                                pin_net.get((c.refdes, pi.index)), bool(pi.default_net)))
+            pg.pins.append(PinG(rname, pi.name or str(pi.index + 1), pi.index, tuple(w), d,
+                                pin_net.get((rname, pi.index)), bool(pi.default_net)))
         for k, tn in enumerate(sym.texts()):
             t = tn.tokens
             try:
@@ -222,7 +247,7 @@ def build(sch: Schematic, with_keepout: bool = True) -> Scene:
             anchor = xform(t[1], c.code, c.pos)
             hh, vv, rr = screen_just(just, c.code)
             role = "refdes" if k == 0 else ("value" if k == 1 else "attr")
-            ti = TextItem(c.refdes, role, s, text_box(anchor, s, size, hh, vv, rr), anchor, tn)
+            ti = TextItem(rname, role, s, text_box(anchor, s, size, hh, vv, rr), anchor, tn)
             pg.texts.append(ti)
             texts.append(ti)
         parts.append(pg)
@@ -256,7 +281,7 @@ def build(sch: Schematic, with_keepout: bool = True) -> Scene:
             continue
         s = text_string(n)
         h, v, r = (just >> 2) & 3, just & 3, (just >> 5) & 3
-        box = text_box(tuple(tk[1]), s, size, h or 1, v or 1, r)
+        box = text_box(tuple(tk[1]), s, size, h or 1, v or 1, r, mono=(flag == 0))
         texts.append(TextItem("directive" if flag == 0 else "comment", "directive" if flag == 0 else "comment",
                               s, box, tuple(tk[1]), n))
     wires = [(tuple(a), tuple(b), n) for a, b, n in sch.wires()]

@@ -127,6 +127,7 @@ def _meas_value(s: str):
 def parse_meas(text: str) -> dict:
     """Parse QPOST output into {name: value | {value, imag, at} | [per-step values]}."""
     res: dict = {}
+    raw: dict = {}
     cur = None
     for line in text.splitlines():
         st = line.strip()
@@ -136,19 +137,28 @@ def parse_meas(text: str) -> dict:
             toks = st.rstrip(":").split()
             name = toks[2] if len(toks) > 2 and toks[1].lower() in ("tran", "ac", "dc", "op", "noise", "tf") else (toks[1] if len(toks) > 1 else st)
             cur = name
-            res[cur] = []
+            raw[cur] = []
             continue
         if cur is None:
             m2 = re.match(r"\s*(\w+)\s*[=:]\s*(.+)$", line)
             if m2:
                 res[m2.group(1)] = _meas_value(m2.group(2))
             continue
-        m = re.match(r"\s*(\d+)\s+(.*)$", line)
-        if m and not st.startswith("("):
-            res[cur].append(_meas_value(m.group(2)))
+        raw[cur].append(st)
+    for k, lines in raw.items():
+        if len(lines) == 1:
+            # one run: "value", "value  at" (FIND..AT) or "value (at Time=..)" - no step index
+            res[k] = _meas_value(lines[0])
+        elif lines:
+            # .step runs: "<step#>  value [at]" per line
+            vals = []
+            for i, st in enumerate(lines):
+                m = re.match(r"(\d+)\s+(.*)$", st)
+                vals.append(_meas_value(m.group(2) if m and int(m.group(1)) == i + 1 else st))
+            res[k] = vals
         else:
-            res[cur].append(_meas_value(st))
-    return {k: (v[0] if isinstance(v, list) and len(v) == 1 else v) for k, v in res.items()}
+            res[k] = None
+    return res
 
 
 def _f(s: str):

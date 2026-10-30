@@ -428,7 +428,8 @@ def _xf_dir(d, code):
 
 def _text_extent(s: str, size=1.0):
     lines = s.split("\n") or [""]
-    return max(len(l) for l in lines) * CHAR_W * size, len(lines) * LINE_H * size
+    from .scene import text_width
+    return max(text_width(l, size) for l in lines), len(lines) * LINE_H * size
 
 
 def prepare_geometry(p: Part):
@@ -605,6 +606,9 @@ class Placer:
         self.spacing = {"compact": 1.0, "normal": 1.25, "spacious": 1.6}.get(style, 1.25)
         self.part_nets = [[n for n in p.nets if n] for p in parts]
         self._memo: dict = {}
+        self._gs: dict = {}         # (i, pos, code) -> absolute geometry
+        self._pc: dict = {}         # pair-cost cache
+        self._oc: dict = {}         # (i, code) -> orientation cost
         self.sig_nets = [n for n, ni in nets.items() if ni.kind == "signal" and len(ni.pins) >= 2]
         self.supply_parts = {i for i, p in enumerate(parts)
                              if self._is_source(p) and all((not n) or nets[n].kind != "signal" for n in p.nets)}
@@ -787,20 +791,24 @@ class Placer:
         for k in rng_:
             if k in own:
                 continue
-            b = self.rect_abs(k, "body", 30)[0]
+            _, _, b40, labs, _ = self._geo_state(k)
+            b = (b40[0] + 10, b40[1] + 10, b40[2] - 10, b40[3] - 10)      # body + 30
             if b[0] < x1 and b[2] > x0 and b[1] < y1 and b[3] > y0 or (straight and _seg_hits(b, x0, y0, x1, y1)):
                 c += 60 if straight or npts == 2 else 25
             if straight:
                 # a straight wire would run through this part's text
-                for lr in self.rect_abs(k, "labels"):
+                for lr in labs:
                     if _seg_hits(lr, x0, y0, x1, y1):
                         c += 35
         return c
 
     def part_cost(self, i):
         p = self.parts[i]
-        c = self._orient_cost(p, p.code) * 40
-        # stubs for ground/rails need free room: handled in overlap via pin zones
+        key = (i, p.code)
+        c = self._oc.get(key)
+        if c is None:
+            # stubs for ground/rails need free room: handled in overlap via pin zones
+            c = self._oc[key] = self._orient_cost(p, p.code) * 40
         return c
 
     def env_abs(self, i):
@@ -816,44 +824,75 @@ class Placer:
             self._memo[key] = r
         return r
 
+    def _geo_state(self, i):
+        """Absolute geometry of part i in its current (pos, code), cached:
+        (envelope, body+90, body+40, texts+stubs, pins)."""
+        p = self.parts[i]
+        key = (i, p.pos, p.code)
+        r = self._gs.get(key)
+        if r is None:
+            g = p.geo[p.code]
+            x, y = p.pos
+            b = g["body"]
+            b90 = (x + b[0] - 90, y + b[1] - 90, x + b[2] + 90, y + b[3] + 90)
+            b40 = (x + b[0] - 40, y + b[1] - 40, x + b[2] + 40, y + b[3] + 40)
+            labs = tuple((x + q[0], y + q[1], x + q[2], y + q[3]) for q in g["labels"] + g.get("stubs", []))
+            env = (min([b90[0]] + [q[0] for q in labs]), min([b90[1]] + [q[1] for q in labs]),
+                   max([b90[2]] + [q[2] for q in labs]), max([b90[3]] + [q[3] for q in labs]))
+            pins = tuple((x + px, y + py) for px, py in g["pins"])
+            r = (env, b90, b40, labs, pins)
+            if len(self._gs) > 150000:
+                self._gs.clear()
+            self._gs[key] = r
+        return r
+
     def pair_cost(self, i, j):
-        EA, EB = self.env_abs(i), self.env_abs(j)
+        # symmetric and a pure function of both parts' (pos, code): cache it, so the
+        # annealer's "before" evaluation of a move is (almost) free
+        if j < i:
+            i, j = j, i
+        pi, pj = self.parts[i], self.parts[j]
+        key = (i, pi.pos, pi.code, j, pj.pos, pj.code)
+        c = self._pc.get(key)
+        if c is None:
+            c = self._pair_cost(i, j)
+            if len(self._pc) > 400000:
+                self._pc.clear()
+            self._pc[key] = c
+        return c
+
+    def _pair_cost(self, i, j):
+        EA, A, Ai, LA, pa = self._geo_state(i)
+        EB, B, Bi, LB, pb = self._geo_state(j)
         if EA[2] <= EB[0] or EB[2] <= EA[0] or EA[3] <= EB[1] or EB[3] <= EA[1]:
             return 0.0
-        A = self.rect_abs(i, "body", 90)[0]
-        B = self.rect_abs(j, "body", 90)[0]
         c = 0.0
-        ov = _ov(A, B)
-        if ov > 0:
-            c += 400 + ov / 2000
-        for la in self.rect_abs(i, "labels"):
-            if _ov(la, B) > 0:
+        w = min(A[2], B[2]) - max(A[0], B[0])
+        if w > 0:
+            h = min(A[3], B[3]) - max(A[1], B[1])
+            if h > 0:
+                c += 400 + w * h / 2000
+        for la in LA:
+            if la[0] < B[2] and B[0] < la[2] and la[1] < B[3] and B[1] < la[3]:
                 c += 180
-            for lb in self.rect_abs(j, "labels"):
-                if _ov(la, lb) > 0:
+            for lb in LB:
+                if la[0] < lb[2] and lb[0] < la[2] and la[1] < lb[3] and lb[1] < la[3]:
                     c += 160
-        for lb in self.rect_abs(j, "labels"):
-            if _ov(lb, A) > 0:
+        for lb in LB:
+            if lb[0] < A[2] and A[0] < lb[2] and lb[1] < A[3] and A[1] < lb[3]:
                 c += 180
         # pins of one part inside the other's body / on foreign pins
-        pa, pb = self.pin_abs(i), self.pin_abs(j)
-        Bi = self.rect_abs(j, "body", 40)[0]
-        Ai = self.rect_abs(i, "body", 40)[0]
+        ni, nj = self.parts[i].nets, self.parts[j].nets
         for k, q in enumerate(pa):
-            if self.parts[i].nets[k] is None:
-                continue
-            if Bi[0] < q[0] < Bi[2] and Bi[1] < q[1] < Bi[3]:
+            if ni[k] is not None and Bi[0] < q[0] < Bi[2] and Bi[1] < q[1] < Bi[3]:
                 c += 300
         for k, q in enumerate(pb):
-            if self.parts[j].nets[k] is None:
-                continue
-            if Ai[0] < q[0] < Ai[2] and Ai[1] < q[1] < Ai[3]:
+            if nj[k] is not None and Ai[0] < q[0] < Ai[2] and Ai[1] < q[1] < Ai[3]:
                 c += 300
         for k, q in enumerate(pa):
             for m, r in enumerate(pb):
-                if q == r and self.parts[i].nets[k] != self.parts[j].nets[m]:
+                if q == r and ni[k] != nj[m]:
                     c += 1000
-                # stub zones of ground/rail pins colliding with other pins
         return c
 
     def net_cost(self, n):
@@ -1470,7 +1509,24 @@ def emit(dr: Drawing, directives: list[str], title: str | None = None, comments:
     from .render import schematic_bbox
     bb = schematic_bbox(sch, include_text=True)
     if directives:
-        sch.add_text((bb[0] + 250, bb[1] + 100), "\n".join(wrap_directives(directives)), directive=True, size=1, just=5)
+        txt = "\n".join(wrap_directives(directives))
+        # tuck the block into the bottom-left corner when that is empty, else put it
+        # below everything - never over a part, wire, label or text
+        cands = [(bb[0] + 250, bb[1] + 100), (bb[0] + 250, bb[1] - 60)]
+        pos = cands[-1]
+        try:
+            from .scene import build as _build, text_box as _tb, boxes_overlap as _bo, seg_hits_box as _sh
+            sc = _build(sch, with_keepout=False)
+            boxes = [p_.body for p_ in sc.parts] + [t.box for t in sc.texts] + [l_.box for l_ in sc.labels]
+            for c in cands[:-1]:
+                tb = _tb(c, txt, 1.0, 1, 1, 0, mono=True)
+                tb = (tb[0] - 40, tb[1] - 40, tb[2] + 40, tb[3] + 40)
+                if not any(_bo(tb, b_) for b_ in boxes) and not any(_sh(a, b_, tb) for a, b_, _ in sc.wires):
+                    pos = c
+                    break
+        except Exception:
+            pass
+        sch.add_text(pos, txt, directive=True, size=1, just=5)
     if title:
         sch.add_text((bb[0] + 250, bb[3] + 50), title, directive=False, size=1.0, just=6)
     for c in comments or []:

@@ -83,6 +83,14 @@ def candidates(p) -> list[tuple[str, float, list]]:
         for dx, dpref in ((100, 1.2), (-100, 1.2), (200, 2.0), (-200, 2.0)):
             out.append((f"ab{dx:+d}", dpref, [((cx + dx, b[3] + 10), 3, 2)] +
                         [((cx + dx, b[1] - 10 - k * LINE_H), 3, 1) for k in range(n - 1)]))
+        # long values (SINE ..., PULSE ...): hang the value text off one end of the body so
+        # it clears a wire that leaves the other pin downwards
+        for nm, xv, hv, dpref in (("ab_l", b[2] - 40, 2, 1.0), ("ab_r", b[0] + 40, 1, 1.0),
+                                  ("ab_lc", cx, 2, 1.6), ("ab_rc", cx, 1, 1.6)):
+            out.append((nm, dpref, [((cx, b[3] + 10), 3, 2)] +
+                        [((xv, b[1] - 10 - k * LINE_H), hv, 1) for k in range(n - 1)]))
+            out.append((nm + "_up", dpref + 0.6, [((cx, b[3] + 10 + (n - 1) * LINE_H), 3, 2)] +
+                        [((xv, b[3] + 10 + (n - 2 - k) * LINE_H), hv, 2) for k in range(n - 1)]))
         out.append(("above", 1.5, [((cx, b[3] + 10 + (n - 1 - k) * LINE_H), 3, 2) for k in range(n)]))
         out.append(("below", 1.5, [((cx, b[1] - 10 - k * LINE_H), 3, 1) for k in range(n)]))
         x = b[2] + 20

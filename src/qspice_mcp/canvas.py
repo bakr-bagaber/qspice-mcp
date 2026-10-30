@@ -30,10 +30,11 @@ def snap(v) -> int:
 def describe(sch: Schematic, include_symbol_geometry=False) -> dict:
     conn = extract(sch)
     comps = []
-    for c in sch.components():
+    from .connectivity import unique_refs
+    for c, un in unique_refs(sch):
         rot, mir, e45 = code_parts(c.code)
         pins = []
-        netmap = {(d["pin"], d["index"]): d["net"] for d in conn["pins"].get(c.refdes, [])}
+        netmap = {(d["pin"], d["index"]): d["net"] for d in conn["pins"].get(un, [])}
         sym = c.symbol
         for p, w in c.pin_positions():
             item = {"pin": p.name or str(p.index + 1), "order": p.index + 1, "x": w[0], "y": w[1],
@@ -42,7 +43,7 @@ def describe(sch: Schematic, include_symbol_geometry=False) -> dict:
                 item["optional"] = True
             pins.append(item)
         b = c.bbox()
-        d = {"ref": c.refdes, "symbol": sym.name, "type": sym.type, "description": sym.description,
+        d = {"ref": un, "symbol": sym.name, "type": sym.type, "description": sym.description,
              "value": c.value, "attributes": c.attributes[1:] if len(c.attributes) > 1 else [],
              "x": c.pos[0], "y": c.pos[1], "rotation": rot * 90 + (45 if e45 else 0), "mirror": mir,
              "bbox": [int(v) for v in b], "pins": pins}
@@ -206,8 +207,9 @@ def _router_for(sch: Schematic, allow_nets: set):
     conn = extract(sch)
     # net name for each wire point
     pin_net = {}
-    for c in sch.components():
-        netmap = {(d["pin"], d["index"]): d["net"] for d in conn["pins"].get(c.refdes, [])}
+    from .connectivity import unique_refs
+    for c, un in unique_refs(sch):
+        netmap = {(d["pin"], d["index"]): d["net"] for d in conn["pins"].get(un, [])}
         for p, w in c.pin_positions():
             pin_net[tuple(w)] = netmap.get((p.name or str(p.index + 1), p.index), f"__{c.refdes}{p.index}")
     from .render import schematic_bbox
@@ -282,12 +284,15 @@ def connect(sch: Schematic, frm, to) -> dict:
     and never touching other nets."""
     pa, da = resolve_point(sch, frm)
     pb, db = resolve_point(sch, to)
+    frm = frm if isinstance(frm, str) else tuple(frm)       # [x, y] lists -> hashable
+    to = to if isinstance(to, str) else tuple(to)
     conn = extract(sch)
     net_of = {}
     for tgt in (frm, to):
         if isinstance(tgt, str):
             ref, pin = tgt.split(".", 1)
-            for d in conn["pins"].get(sch.component(ref).refdes, []):
+            from .connectivity import uname
+            for d in conn["pins"].get(uname(sch, ref), []):
                 if d["pin"].lower() == pin.lower() or str(d["index"] + 1) == pin:
                     net_of[tgt] = d["net"]
     nets = set(net_of.values())
@@ -402,7 +407,8 @@ def add_label(sch: Schematic, at, name: str, direction: str | None = None, port:
     if isinstance(at, str) and not is_gnd:
         ref, pin = at.split(".", 1)
         c = sch.component(ref)
-        for dd in conn["pins"].get(c.refdes if c else ref, []):
+        from .connectivity import uname
+        for dd in conn["pins"].get(uname(sch, ref), []):
             if (dd["pin"].lower() == pin.lower() or str(dd["index"] + 1) == pin) and \
                     str(dd["net"]).lower() == name.lower():
                 return {"label": name, "note": f"{at} is already on net '{name}'; nothing added"}
@@ -414,12 +420,16 @@ def add_label(sch: Schematic, at, name: str, direction: str | None = None, port:
         return _add_ground_smart(sch, p, d, stub)
     if stub and not explicit:
         free = _free_stub_dirs(sch, p, stub)
-        if direction not in free:
-            pref = [x for x in ([d] if d else []) + ["U", "R", "L", "D"] if x in free]
-            if pref:
-                direction = pref[0]
-            else:
-                stub = 0          # nowhere to go: put the label right on the pin
+        pref = [x for x in ([direction] if direction else []) + ([d] if d else []) + ["U", "R", "L", "D"]
+                if x in free]
+        pref = list(dict.fromkeys(pref))
+        if pref:
+            # cheapest free direction: label text over a part body / other label is bad,
+            # over a refdes/value text is tolerable (those texts get moved afterwards)
+            costs = [(_label_text_hits(sch, p, x, stub, name), i, x) for i, x in enumerate(pref)]
+            direction = min(costs)[2]
+        else:
+            stub = 0          # nowhere to go: put the label right on the pin
     pt = p
     if stub:
         q = (p[0] + DIRS[direction][0] * G * stub, p[1] + DIRS[direction][1] * G * stub)
@@ -428,7 +438,64 @@ def add_label(sch: Schematic, at, name: str, direction: str | None = None, port:
     sch.add_net_label(pt, name, _DIR_JUST[direction], port=port)
     split_wires_at_tees(sch)
     refresh_junctions(sch)
-    return {"label": name, "x": pt[0], "y": pt[1], "direction": direction}
+    out = {"label": name, "x": pt[0], "y": pt[1], "direction": direction}
+    moved = _retidy_texts_near(sch, p, pt, name, direction)
+    if moved:
+        out["texts_moved"] = moved
+    return out
+
+
+def _label_box(pt, name: str, direction: str):
+    from .scene import text_box
+    just = _DIR_JUST[direction]
+    h, v, r = (just >> 2) & 3, just & 3, (just >> 5) & 3
+    off = {1: -25, 2: 25, 3: 0}.get(v, 25)
+    hoff = {1: 25, 2: -25, 3: 0}.get(h, 0)
+    return text_box((pt[0] + hoff, pt[1] + off), name, 1.0, h or 1, v or 2, r)
+
+
+def _label_text_hits(sch: Schematic, p, direction: str, stub: int, name: str) -> int:
+    """Cost of a label stub in `direction`: 0 = clear; +1 per part text (refdes/value,
+    movable) it covers; +10 per part body, wire, other label or note it covers."""
+    from .scene import boxes_overlap, build, seg_hits_box
+    q = (p[0] + DIRS[direction][0] * G * stub, p[1] + DIRS[direction][1] * G * stub)
+    lb = _label_box(q, name, direction)
+    sc = build(sch, with_keepout=False)
+    cost = 0
+    for t in sc.texts:
+        if t.role not in ("refdes", "value", "attr", "label", "directive", "comment"):
+            continue
+        if seg_hits_box(p, q, t.box, shrink=8) or boxes_overlap(lb, t.box):
+            cost += 1 if t.role in ("refdes", "value", "attr") else 10
+    shr = (lb[0] + 10, lb[1] + 10, lb[2] - 10, lb[3] - 10)
+    for part in sc.parts:
+        b = part.body
+        if boxes_overlap(shr, (b[0] + 8, b[1] + 8, b[2] - 8, b[3] - 8)):
+            cost += 10
+    for a, b, _ in sc.wires:
+        if seg_hits_box(a, b, lb, shrink=12):
+            cost += 10
+    return cost
+
+
+def _retidy_texts_near(sch: Schematic, p, pt, name: str, direction: str) -> list[str]:
+    """Move refdes/value texts of parts that the new label stub or label text now
+    covers (the same text optimiser auto_draw uses).  Returns the parts moved."""
+    from .scene import boxes_overlap, build, seg_hits_box
+    from . import labels as _labels
+    lb = _label_box(pt, name, direction)
+    hit = set()
+    for t in build(sch, with_keepout=False).texts:
+        if t.owner and t.role in ("refdes", "value", "attr"):
+            if (p != pt and seg_hits_box(p, pt, t.box, shrink=8)) or boxes_overlap(lb, t.box):
+                hit.add(t.owner)
+    if not hit:
+        return []
+    try:
+        _labels.optimize(sch, refs=sorted(hit))
+    except Exception:
+        return []
+    return sorted(hit)
 
 
 def delete(sch: Schematic, refs=(), wires_touching=(), labels_at=(), remove_dangling=True) -> dict:

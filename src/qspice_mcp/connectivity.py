@@ -45,6 +45,29 @@ def _on_seg(p, a, b):
     return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
 
 
+def unique_refs(sch: Schematic) -> list:
+    """[(component, name)] in file order; parts sharing a designator are told apart
+    as C1, C1#2, C1#3 ... (the same names Schematic.component() understands)."""
+    seen: dict = defaultdict(int)
+    out = []
+    for c in sch.components():
+        seen[c.refdes.lower()] += 1
+        k = seen[c.refdes.lower()]
+        out.append((c, c.refdes if k == 1 else f"{c.refdes}#{k}"))
+    return out
+
+
+def uname(sch: Schematic, ref: str) -> str:
+    """The extract()/scene name of the part that Schematic.component(ref) returns."""
+    c = sch.component(ref)
+    if c is None:
+        return ref
+    for cc, n in unique_refs(sch):
+        if cc.node is c.node:
+            return n
+    return c.refdes
+
+
 def extract(sch: Schematic) -> dict:
     uf = UF()
     wires = sch.wires()
@@ -54,9 +77,9 @@ def extract(sch: Schematic) -> dict:
         uf.u(("P", a), ("W", i)); uf.u(("P", b), ("W", i))
         points.add(a); points.add(b)
     pins = []
-    for c in sch.components():
+    for c, rname in unique_refs(sch):
         for p, w in c.pin_positions():
-            pins.append((c.refdes, p.name or str(p.index + 1), p.index, w, p.default_net))
+            pins.append((rname, p.name or str(p.index + 1), p.index, w, p.default_net))
             points.add(w)
     labels = sch.nets()
     for p, name, *_ in labels:

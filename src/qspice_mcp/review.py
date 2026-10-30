@@ -55,11 +55,17 @@ def review(sch: Schematic, scene: Scene | None = None, intended: dict | None = N
     # ------------------------------------------------------------ basics
     refs = defaultdict(int)
     for p in parts:
-        refs[p.ref.lower()] += 1
+        refs[p.comp.refdes.lower()] += 1
     for r, n in refs.items():
         if n > 1:
-            I.add("error", "DUPLICATE_REFDES", f"reference designator {r} is used {n} times",
-                  fix=f"update_component(ref='{r.upper()}', new_ref='<unused name>') to rename one of them")
+            same = [p for p in parts if p.comp.refdes.lower() == r]
+            desc = "; ".join(f"{same[0].comp.refdes}#{k + 1} = value '{(p.comp.value or '').strip()}' at "
+                             f"({p.comp.pos[0]},{p.comp.pos[1]})" for k, p in enumerate(same))
+            I.add("error", "DUPLICATE_REFDES", f"reference designator {same[0].comp.refdes} is used {n} times: {desc}. "
+                  f"Address each one as {same[0].comp.refdes}#1, {same[0].comp.refdes}#2, ... until they are renamed.",
+                  at=same[-1].comp.pos, refs=[same[0].comp.refdes],
+                  fix=f"update_component(ref='{same[0].comp.refdes}#{n}', new_ref='<unused name>') renames the "
+                      f"#{n} one (pick the one whose value/position is wrong)")
     subsheet = any(l.port for l in sc.labels)   # hierarchical block contents
     if parts and not subsheet and not any(l.is_ground for l in sc.labels) and "0" not in sc.conn["nets"]:
         I.add("error", "NO_GROUND", "the circuit has no ground (net 0). SPICE needs a ground reference.",
@@ -230,7 +236,7 @@ def review(sch: Schematic, scene: Scene | None = None, intended: dict | None = N
             own = (p.ref == t.owner)
             if own and (_inside(t.anchor, p.body, 0) or _kind_of(p) == "block"):
                 continue  # text designed inside / on its own symbol (op-amp, switches, blocks)
-            if boxes_overlap(_shrink(t.box, 15), _shrink(p.body, 10)):
+            if boxes_overlap(_shrink(t.box, 15), _shrink(p.body, 10)) and _box_hits_shape(_shrink(t.box, 15), p):
                 I.add("warning", "TEXT_ON_PART", f"text '{_short(t.text)}' ({_who(t)}) is drawn over {p.ref}",
                       at=_center(t.box), refs=[p.ref], fix=(f"fix_text_placement(refs=['{t.owner}'])" if not t.owner.startswith(("label", "dir", "com")) else f"move_component(ref='{p.ref}', dx=200)"),
                       key=("TOP", t.owner, t.role, p.ref))
@@ -294,6 +300,24 @@ def review(sch: Schematic, scene: Scene | None = None, intended: dict | None = N
 
 
 # ------------------------------------------------------------------ helpers
+
+def _box_hits_shape(box, p, step: float = 25.0) -> bool:
+    """Does a text box touch the symbol's drawing itself (not just the empty corners
+    of its bounding box, e.g. beside an op-amp triangle)?"""
+    x0, y0 = max(box[0], p.body[0]), max(box[1], p.body[1])
+    x1, y1 = min(box[2], p.body[2]), min(box[3], p.body[3])
+    if x0 >= x1 or y0 >= y1:
+        return False
+    if not (p.polys or p.segs or p.ellipses):
+        return True
+    nx = max(2, int((x1 - x0) / step) + 1)
+    ny = max(2, int((y1 - y0) / step) + 1)
+    for i in range(nx):
+        for j in range(ny):
+            if p.hits_shape((x0 + (x1 - x0) * i / (nx - 1), y0 + (y1 - y0) * j / (ny - 1)), near=12.0):
+                return True
+    return False
+
 
 def _next_steps(items, score):
     codes = {d["code"] for d in items}

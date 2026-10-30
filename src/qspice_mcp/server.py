@@ -295,7 +295,8 @@ def help_topic(topic: str, max_chars: int = 12000) -> str:
     'Oslash-device' (C++/Verilog DLL block), 'WaveformExpressions', 'STEP'.
     topic='index' lists all pages."""
     if topic.strip().lower() in ("index", "list", "topics", ""):
-        return "\n".join(helpdocs.topics())
+        pg = helpdocs.pages()
+        return "\n".join(f"{t}: {pg[t].split(chr(10), 1)[0][:70]}" for t in helpdocs.topics())
     return helpdocs.get(topic)[:max_chars]
 
 
@@ -830,6 +831,10 @@ def validate_schematic(path: str) -> str:
 
 def _draw_result(res: dict, sch: Schematic, show: bool) -> list:
     res.pop("attempt_scores", None)          # internal layout costs - not meaningful to users
+    m = res.pop("metrics", None)             # router-internal lengths differ from review stats
+    if m:
+        res["layout"] = {"wire_crossings": m.get("crossings", 0), "bends": m.get("bends", 0),
+                         "unrouted_connections": m.get("failed_connections", 0)}
     v = res.get("validation", {})
     if "netlist" in v and len(v["netlist"]) > 4000:
         v["netlist"] = v["netlist"][:4000] + "\n..."

@@ -209,9 +209,19 @@ class Schematic:
         return [Component(n) for n in self.root.findall("component")]
 
     def component(self, ref: str) -> Component | None:
+        """Find a part by reference designator. 'C1#2' = the 2nd part named C1 (in file
+        order) - the way to address one of several parts that share a designator."""
+        ref = ref.strip()
+        k = 1
+        m = re.match(r"^(.*?)#(\d+)$", ref)
+        if m:
+            ref, k = m.group(1), max(1, int(m.group(2)))
+        n = 0
         for c in self.components():
             if c.refdes.lower() == ref.lower():
-                return c
+                n += 1
+                if n == k:
+                    return c
         return None
 
     def wires(self) -> list[tuple[tuple, tuple, str]]:
