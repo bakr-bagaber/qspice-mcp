@@ -20,8 +20,12 @@ symbol creation and step-by-step skills.
 - **Skills**: 11 guides (drafting standard + feedback loop, auto-draw spec, canvas editing, symbols,
   simulation, waveforms, models, netlist import, troubleshooting, 15 tested recipes) served by
   `qspice_guide`, MCP prompts and resources, and exportable as Claude skills.
+- **Tested with small models**: Claude Haiku 5.5 and Claude Sonnet 5.5 each completed 20 tasks
+  (drawing, editing, repair, symbols, hierarchy, import, sweeps, measurements) using only the tools and
+  skills - all 40 runs passed with review score 96-100 and correct simulation results
+  ([TESTING.md](TESTING.md)).
 
-## Tools (51)
+## Tools (52)
 
 | Area | Tools |
 |---|---|
@@ -32,7 +36,7 @@ symbol creation and step-by-step skills.
 | Results | `list_traces`, `get_trace_data`, `evaluate_expressions`, `export_waveforms`, `measure`, `plot_waveforms` |
 | QSPICE extras | `dll_variables`, `protect_netlist`, `open_in_qspice`, `launch_tool` |
 | See & check | `read_schematic`, `render_schematic`, `review_schematic`, `canvas_map`, `validate_schematic` |
-| Create | `auto_draw_schematic`, `netlist_to_schematic`, `beautify_schematic`, `new_schematic` |
+| Create | `auto_draw_schematic`, `netlist_to_schematic`, `beautify_schematic`, `new_schematic`, `copy_schematic` |
 | Edit | `add_component`, `place_component`, `move_component`, `update_component`, `delete_items`, `connect_pins`, `connect_many`, `add_wire`, `add_net_label`, `add_ground`, `set_directives`, `add_comment`, `reroute_schematic`, `fix_text_placement`, `undo_last_edit` |
 
 Prompts: `draw_circuit`, `review_and_fix`, `simulate_and_report`. Resources: `qspice://skills`,
@@ -133,7 +137,7 @@ round-trips all installed QSPICE files byte-for-byte.
 * 15 recipe circuits draw with review score 100, validate, simulate and meet their expected `.meas`
   results.
 * LLM test campaign with Claude Haiku and Claude Sonnet using only the tools and skills: see
-  `TESTING.md`.
+  `TESTING.md`; the harness (task generator, fixtures, reference answers, graders) is in `tests\llm`.
 
 ## Layout
 ```

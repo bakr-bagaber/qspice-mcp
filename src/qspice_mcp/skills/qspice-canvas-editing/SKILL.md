@@ -47,6 +47,7 @@ plot or `.meas`, make sure a label `mid` exists (`add_net_label`).
 | `add_ground` | ground symbol (points down) | `add_ground(path, at='C1.2')` |
 | `move_component` | move/rotate, wires follow | `move_component(path, ref='R3', dx=300)` |
 | `update_component` | value / params / rename | `update_component(path, ref='R1', value='4.7K')` |
+| `copy_schematic` | save a copy ('save as') before editing | `copy_schematic(path, new_path='fixed.qsch')` |
 | `delete_items` | delete parts, wires, labels | `delete_items(path, refs=['R5'])`, `wires_at=[[x,y]]` (a point in the MIDDLE of a segment deletes only that segment; a corner/junction point deletes every segment ending there), `labels_at=[[x,y]]` (also removes the label's stub) |
 | `add_wire` | explicit polyline (rarely needed) | `add_wire(path, points=[[0,0],[0,400],[600,400]])` |
 | `set_directives` | analysis/model/meas commands | `set_directives(path, ['.tran 10m', '.meas vmax MAX V(out)'])` |
@@ -97,6 +98,22 @@ Prefer net labels over long wires:
 
 ### Mark a node for plots / .meas
 `add_net_label(path, at='C1.1', name='out')` then `.meas vmax MAX V(out)`.
+
+### Move a net label / ground symbol
+Labels cannot be dragged: `delete_items(path, labels_at=[[x, y]])` (its stub goes too), then
+`add_net_label(path, at='<REF.PIN or [x, y] on the net>', name='out', direction='R')`.
+
+### Two parts with the same designator
+The reviewer reports `DUPLICATE_REFDES` with each part's value and position and calls them
+`C1#1`, `C1#2`, ... Every tool accepts that form: rename the wrong one first,
+`update_component(path, ref='C1#2', new_ref='C2')`, then fix its pins (`C2.+`).
+
+### Repair a broken sheet but keep the original
+`copy_schematic(path, new_path='fixed.qsch')`, then edit `fixed.qsch`.
+A dangling wire end can be a target: `connect_pins(path, from_pin='C2.+', to=[2400, 500])`.
+
+Wiring tools (`connect_pins`, `connect_many`, `add_wire`, `add_net_label`, `add_ground`) re-place the
+reference/value texts that a new wire would cross (`texts_moved` in the result).
 
 ### Clean up a messy sheet
 1. `review_schematic` -> fix connectivity errors first.

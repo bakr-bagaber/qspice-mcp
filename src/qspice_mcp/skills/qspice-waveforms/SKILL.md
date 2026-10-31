@@ -54,7 +54,8 @@ For dB use `20*log10(mag(V(out)))`.
 
 `get_trace_data(path, traces=['V(out)'], max_points=50)` -> statistics (min, max, avg, rms, first, last,
 x at min/max) and evenly spaced samples. Options: `x_min`, `x_max`, `step` (which .step run).
-AC traces come as `magnitude_dB` and `phase_deg`.
+AC traces come as `magnitude_dB` and `phase_deg`. avg/rms are time-weighted over exactly
+[x_min, x_max] (the window edges are interpolated), so they agree with `.meas AVG/RMS`.
 
 ## 5. Expressions: evaluate_expressions
 
@@ -67,7 +68,7 @@ QSPICE evaluates any waveform expression: `evaluate_expressions(path, ['V(out)/V
 With `.step param R list 1K 10K 100K` the result holds one run per value:
 - `simulate` lists `steps` (index -> parameter values).
 - `plot_waveforms` overlays all runs (or `steps=[2]`).
-- `.meas` results come out per step.
+- `.meas` results come out per step, labelled with the step values (`{'cx=1e-08': 15916.5, ...}`).
 - `get_trace_data(..., step=2)` reads one run.
 
 ## 7. Fourier / THD
@@ -79,7 +80,10 @@ Or `measure(path, ['.four 1K 9 1 V(out)'])` on an existing result.
 ## 8. Export
 
 `export_waveforms(path, ['V(out)', 'I(L1)'], out_file='data.csv', fmt='CSV')` (also `ASCII`, `SPICE` for a
-PWL file, `S2P`).
+PWL file, `S2P`). QSPICE resamples the data onto evenly spaced points (`n_points`, default 1001)
+over the whole run; the first column is the x axis (Time / Frequency).
+
+`measure` writes nothing next to your files (its helper netlist lives in the temp folder).
 
 ## 9. Reporting results
 

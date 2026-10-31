@@ -51,6 +51,10 @@ class Router:
         self.edges: dict = {}              # frozenset(p,q) -> net
         self.bend_cost, self.cross_cost, self.soft_cost = bend_cost, cross_cost, soft_cost
         self.routes: dict[str, NetRoute] = {}
+        # pins at the far end of a two-terminal part's lead: a wire may leave/enter them
+        # sideways at little cost (a straight bus across the tops of shunt parts instead
+        # of an up-over-down bump)
+        self.easy: set = set()
         # pins own their point
         for p, n in self.pins.items():
             self.owner[p] = n
@@ -139,11 +143,11 @@ class Router:
                     if p in self.through and self.through[p][0] != net:
                         continue
                 if p == start.pos and start.dir is not None and nd != start.dir:
-                    cost += self.bend_cost * 1.5
+                    cost += self.bend_cost * (0.4 if p in self.easy else 1.5)
                 if is_target:
                     kind, appr = targets[q]
                     if kind == "pin" and appr is not None and nd != OPP[appr]:
-                        cost += self.bend_cost * 1.5
+                        cost += self.bend_cost * (0.4 if q in self.easy else 1.5)
                     if kind == "deg3":
                         cost += 4.0
                 ng = g + cost

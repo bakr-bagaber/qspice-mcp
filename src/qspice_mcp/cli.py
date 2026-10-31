@@ -27,9 +27,22 @@ import time
 from pathlib import Path
 
 
-def parse_args(argv: list[str]) -> dict:
+def _types(prop: dict) -> set:
+    t = set()
+    if "type" in prop:
+        t.add(prop["type"])
+    for x in prop.get("anyOf", []) or []:
+        if isinstance(x, dict) and "type" in x:
+            t.add(x["type"])
+    return t
+
+
+def parse_args(argv: list[str], schema: dict | None = None) -> dict:
+    """key=value pairs (typed by the tool's schema: value=10 stays the string '10' for a
+    string parameter), a JSON/Python dict, @file.json or file.json, or one bare path."""
     if not argv:
         return {}
+    props = (schema or {}).get("properties", {})
     if len(argv) == 1:
         s = argv[0].strip()
         if s.startswith("@"):
@@ -41,10 +54,22 @@ def parse_args(argv: list[str]) -> dict:
     out = {}
     for a in argv:
         if "=" not in a:
+            # a bare path for a tool whose first parameter is `path`
+            if "path" in props and "path" not in out and (re.search(r"\.(qsch|qraw|cir|net|qsym|lib)$", a, re.I)
+                                                       or Path(a).exists()):
+                out["path"] = a
+                continue
             raise SystemExit(f"cannot parse argument '{a}': use key=value, a JSON dict, or a .json file")
         k, v = a.split("=", 1)
+        ty = _types(props.get(k, {}))
+        if ty == {"string"} or (ty and ty <= {"string", "null"}):
+            out[k] = v                      # keep '10', '4.7K', 'True' as text
+            continue
         try:
-            out[k] = json.loads(v)
+            val = json.loads(v)
+            if isinstance(val, (int, float)) and "string" in ty and not ({"integer", "number"} & ty):
+                val = v
+            out[k] = val
         except json.JSONDecodeError:
             out[k] = _loose_list(v) if v.strip().startswith("[") and v.strip().endswith("]") else v
     return out
@@ -97,8 +122,21 @@ def _img_dir() -> Path:
     return d
 
 
-async def _call(name: str, args: dict) -> int:
+async def _schema(name: str) -> dict | None:
     from .server import mcp
+    for t in await mcp.list_tools():
+        if t.name == name:
+            return getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
+    return None
+
+
+async def _call(name: str, argv: list[str]) -> int:
+    from .server import mcp
+    schema = await _schema(name)
+    if schema is None:
+        print(f"no tool named '{name}'. 'qmcp tools' lists them.")
+        return 2
+    args = parse_args(argv, schema)
     t0 = time.time()
     try:
         res = await mcp.call_tool(name, args)
@@ -143,7 +181,11 @@ async def _tools(verbose: bool = False):
     from .server import mcp
     tools = await mcp.list_tools()
     for t in tools:
-        desc = (t.description or "").strip().split("\n")[0]
+        text = " ".join((t.description or "").split())
+        m = re.match(r"(.+?(?<!e\.g)(?<!i\.e)(?<!etc)[.!?])(\s|$)", text)
+        desc = m.group(1) if m else text
+        if len(desc) > 180:
+            desc = desc[:177].rsplit(" ", 1)[0] + " ..."
         print(f"{t.name}: {desc}")
     print(f"\n{len(tools)} tools. 'qmcp help <tool>' shows parameters.")
 
@@ -189,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         if not rest:
             print("usage: qmcp call <tool> <args>")
             return 2
-        return asyncio.run(_call(rest[0], parse_args(rest[1:])))
+        return asyncio.run(_call(rest[0], rest[1:]))
     if cmd == "export-skills":
         import shutil
         from . import skills
@@ -199,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copytree(skills.ROOT / n, dest / n, dirs_exist_ok=True)
             print(f"copied {n} -> {dest / n}")
         return 0
+    # 'qmcp get_symbol name=V' -> same as 'qmcp call get_symbol name=V'
+    if asyncio.run(_schema(cmd)) is not None:
+        return asyncio.run(_call(cmd, rest))
     print(f"unknown command {cmd}\n{__doc__}")
     return 2
 

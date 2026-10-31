@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 - 2026-10-30
+## 0.2.0 - 2026-10-31
 
 Focus: make *any* LLM (including small models) able to draw clean schematics and use QSPICE well.
 
@@ -53,6 +53,35 @@ and 15 tested circuit recipes. `qmcp export-skills` copies them into `~/.claude/
   shell-based agents and for testing.
 - Symbol library cache now uses a stable signature (startup 5 s -> 0.05 s).
 - Smoke test covers the new tools through the real MCP protocol.
+
+### Found and fixed by testing with Claude Haiku and Sonnet (see TESTING.md)
+- Tool errors reach the model with their real message (the MCP SDK hid the text of most exceptions).
+- Edit results report `connectivity_changes` (nets an edit split or shorted).
+- Auto-draw labels every net you named, so `V(name)` works in plots and `.meas`; the result lists
+  nets that stayed unlabelled and reports layout stats instead of router internals.
+- `delete_items`: a point inside a wire deletes only that segment; deleting a label removes its stub.
+- Automatic net names never collide with label names; `beautify_schematic` names unnamed supply nets.
+- Plots and trace data accept expressions (`V(out)-V(in)`, `mag(V(out))`); hierarchical current
+  names (`I(R1.X1)`) work in `measure`.
+- `.meas` results of `.step` runs come back per step.
+- Parts sharing a designator are addressed as `C1#2` in review messages and every editing tool.
+- `connect_pins` accepts a point `[x, y]` as target (e.g. the loose end of a dangling wire).
+- `help_search` ranks pages properly (BM25 + page titles + synonyms: "behavioral voltage source" ->
+  B-device, "sweep" -> .step); `help_topic('index')` lists page titles.
+- Text placement: designed symbol texts move as a group; long source values hang off the body end;
+  net labels pick the least cluttered side; the directive block never covers labels or parts.
+- Reviewer: proportional text widths; text beside an op-amp triangle is no longer "on the part".
+- `add_component`: series parts continue the signal path; net-name targets land near that net.
+- Auto-draw is 3-4x faster (cached placement costs): a 21-part sheet takes 3 s (effort 1) / 12 s
+  (effort 2), with identical results.
+- Round 2: the router no longer draws up-over-down bumps between shunt parts (sideways entry into the
+  end pins of two-terminal parts); wiring tools re-place texts a new wire crosses; `search_models`
+  includes VDMOS power MOSFETs in NMOS/PMOS searches and shows ratings; CSV export line ends fixed;
+  `get_trace_data` statistics over exactly the requested window; `.op` values returned by `simulate`;
+  `measure` leaves no files behind; review deltas survive renames; shunt loads stand vertical and signal
+  sources share a baseline in auto-draw; net labels avoid part texts; `copy_schematic`; CLI accepts
+  `value=10` as text, a bare path, and tool names without `call`; netlist notation explained.
+- `tests/llm`: the LLM test harness (20 tasks, fixtures, reference answers, graders).
 
 ## 0.1.0 - 2026-10-30
 Initial release: simulation, netlisting, waveforms, QPOST measurements, help/symbol/model search,

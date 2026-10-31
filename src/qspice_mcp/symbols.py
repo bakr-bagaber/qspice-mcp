@@ -109,7 +109,7 @@ class SymbolLibrary:
                 h = zlib.crc32(f"{p}|{int(st.st_mtime)}|{st.st_size}".encode("utf-8", "replace"), h)
             except OSError:
                 pass
-        return f"{len(files)}:{h:08x}:v4"
+        return f"{len(files)}:{h:08x}:v5"
 
     def load(self, force: bool = False):
         if self._loaded and not force:
@@ -156,6 +156,15 @@ class SymbolLibrary:
             best_desc = desc_cnt.most_common(1)[0][0]
             best = max(((k, n) for k, n in cnt.items() if k[0] == best_desc), key=lambda kv: kv[1])[0]
             sn, p = nodes[(name, best[0], best[1])]
+            if name.upper() in ("B1", "B2"):
+                # behavioural sources: don't show one example's expression as the default
+                try:
+                    from .model import Symbol as _S, set_text_string as _sts
+                    tx = _S(sn).texts()
+                    if len(tx) > 1:
+                        _sts(tx[1], "V=0" if name.upper() == "B1" else "I=0")
+                except Exception:
+                    pass
             entries[name] = _entry(sn, f"example:{p.name}")
         # 2) .qsym files override (pristine definitions)
         for p in qsyms:

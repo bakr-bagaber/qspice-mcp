@@ -178,8 +178,11 @@ def export(qraw: str | Path, exprs: list[str], npoints: int | None = None, fmt: 
     args.append(fmt.upper())
     args.append("-stdout")
     rc, so, se, _ = _run(args, cwd=raw.parent, timeout=timeout)
+    # QUX writes CRLF in text mode: normalise, then let Python write native line ends
+    so = so.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
     if out:
-        Path(out).write_text(so, encoding="utf-8")
+        with open(out, "w", encoding="utf-8", newline="\r\n" if os.name == "nt" else "\n") as fh:
+            fh.write(so)
     if not so.strip():
         raise RuntimeError(f"QUX export produced no output (rc={rc}) {se}")
     return so

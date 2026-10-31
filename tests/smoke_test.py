@@ -116,6 +116,20 @@ async def main():
             grab("connect", await s.call_tool("connect_pins", {"path": "canvas.qsch", "from_pin": "R1.1", "to": "C1.+"}))
             grab("ground", await s.call_tool("add_ground", {"path": "canvas.qsch", "at": "C1.-"}))
             grab("validate", await s.call_tool("validate_schematic", {"path": "canvas.qsch"}))
+            # save-as, duplicate designators, point targets, stepped .meas, operating point
+            grab("copy", await s.call_tool("copy_schematic", {"path": "canvas.qsch", "new_path": "canvas2.qsch",
+                                                              "overwrite": True}))
+            t = grab("op_sim", await s.call_tool("simulate", {"netlist_text": "* op\nV1 a 0 10\nR1 a b 10K\nR2 b 0 4.7K\n.op\n",
+                                                              "name": "smoke_op"}))
+            check(abs(json.loads(t)["operating_point"]["V(b)"] - 3.19728) < 1e-3, "operating point values")
+            t = grab("step_sim", await s.call_tool("simulate", {"netlist_text": "* st\nV1 in 0 AC 1\nR1 in out 1K\n"
+                                                                ".param Cx=1n\nC1 out 0 {Cx}\n.step param Cx list 10n 100n\n"
+                                                                ".ac dec 20 10 1Meg\n.meas f3 WHEN mag(V(out))=.7071\n",
+                                                                "name": "smoke_step"}))
+            m = json.loads(t)["measurements"]["f3"]
+            check(isinstance(m, dict) and len(m) == 2, "stepped .meas labelled per step")
+            t = grab("models", await s.call_tool("search_models", {"query": "IRF640", "model_type": "NMOS"}))
+            check("IRF640" in t and "ratings" in t, "VDMOS power FET found as NMOS")
     print("\nFAILURES:" if FAIL else "\nALL PASSED", *FAIL, sep="\n  ")
     sys.exit(1 if FAIL else 0)
 

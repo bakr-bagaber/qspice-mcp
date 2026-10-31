@@ -1,4 +1,4 @@
-"""Model / subcircuit discovery across QSPICE's bundled libraries."""
+﻿"""Model / subcircuit discovery across QSPICE's bundled libraries."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ def _index():
         if d.exists():
             for ext in ("*.txt", "*.lib", "*.mod", "*.sub", "*.cir", "*.inc"):
                 files += [p for p in d.rglob(ext) if p.stat().st_size < 40_000_000]
-    sig = f"{len(files)}:{sum(int(p.stat().st_mtime) for p in files)}"
+    sig = f"v4:{len(files)}:{sum(int(p.stat().st_mtime) for p in files)}"
     cf = cache_dir() / "models.json"
     if cf.exists():
         try:
@@ -41,28 +41,71 @@ def _index():
         for m in _PAT.finditer(t):
             kind, name, typ = m.group(1).lower(), m.group(2), m.group(3)
             if kind == "subckt":
-                line = t[m.start(): t.find("\n", m.start())]
+                line = t[m.start(1): t.find("\n", m.start(1))]
                 pins = [x for x in line.split()[2:] if "=" not in x and x.lower() != "params:"]
                 items.append({"kind": "subckt", "name": name, "pins": pins[:40], "file": str(p)})
             else:
-                items.append({"kind": "model", "name": name, "type": typ.upper(), "file": str(p)})
+                # the model card incl. '+' continuation lines (for ratings / polarity)
+                ls = m.start(1)                     # the 'model' keyword (^\s* may eat blank lines)
+                end = t.find("\n", ls)
+                card = t[ls: end if end > 0 else len(t)]
+                rest = t[end + 1: end + 3000] if end > 0 else ""
+                for l in rest.split("\n"):
+                    if l.lstrip().startswith("+"):
+                        card += " " + l.lstrip()[1:]
+                    else:
+                        break
+                it = {"kind": "model", "name": name, "type": typ.upper(), "file": str(p)}
+                low = card.lower()
+                if typ.upper() == "VDMOS":
+                    it["polarity"] = "P" if re.search(r"\bpchan\b", low) else "N"
+                rt = {}
+                for k in _RATINGS:
+                    mm = re.search(r"\b" + k + r"\s*=\s*(\"[^\"]*\"|[^\s)]+)", card, re.I)
+                    if mm:
+                        rt[k] = mm.group(1).strip('"')
+                if rt:
+                    it["ratings"] = rt
+                items.append(it)
     cf.write_text(json.dumps({"sig": sig, "items": items}), encoding="utf-8")
     _IDX = items
     return items
 
 
+_RATINGS = ("mfg", "Vds", "Ids", "Ron", "Qg", "Vgsmax", "Vceo", "Icrating", "Iave", "Vpk", "Vrev", "Ipk")
+_TYPE_ALIASES = {"NFET": "NMOS", "PFET": "PMOS", "NCH": "NMOS", "PCH": "PMOS", "DIODE": "D", "SCHOTTKY": "D"}
+
+
+def _type_ok(it: dict, want: str) -> bool:
+    t = it.get("type", "").upper()
+    want = _TYPE_ALIASES.get(want.upper(), want.upper())
+    if t == want:
+        return True
+    # power MOSFETs are VDMOS models: an NMOS/PMOS search includes them by polarity
+    if t == "VDMOS" and want in ("NMOS", "PMOS"):
+        return it.get("polarity", "N") == want[0]
+    return False
+
+
 def search(query: str = "", kind: str | None = None, type_: str | None = None, limit: int = 50) -> list[dict]:
     q = query.lower().split()
+    seen: dict = {}
     out = []
     for it in _index():
         if kind and it["kind"] != kind:
             continue
-        if type_ and it.get("type", "").upper() != type_.upper():
+        if type_ and not _type_ok(it, type_):
             continue
-        hay = (it["name"] + " " + it.get("type", "") + " " + Path(it["file"]).name).lower()
+        hay = (it["name"] + " " + it.get("type", "") + " " + Path(it["file"]).name + " " +
+               " ".join(f"{k}={v}" for k, v in (it.get("ratings") or {}).items())).lower()
         if all(w in hay for w in q):
+            key = (it["kind"], it["name"].lower(), it.get("type", ""))
+            if key in seen:                       # same model in several library files
+                seen[key].setdefault("also_in", []).append(Path(it["file"]).name)
+                continue
             d = dict(it)
             d["library"] = Path(it["file"]).name
+            seen[key] = d
             out.append(d)
     out.sort(key=lambda d: (len(d["name"]), d["name"]))
     return out[:limit]

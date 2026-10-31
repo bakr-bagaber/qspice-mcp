@@ -28,6 +28,7 @@ QSPICE is a free, fast SPICE circuit simulator by Qorvo. This server lets you:
 | Tidy all wires | `reroute_schematic(path)` |
 | Fix overlapping texts | `fix_text_placement(path)` |
 | Undo a bad edit | `undo_last_edit(path)` |
+| Work on a copy (save as) | `copy_schematic(path, new_path)` |
 | Redraw a messy sheet completely | `beautify_schematic(path)` |
 | Add analysis commands | `set_directives(path, ['.tran 10m'])` |
 | Simulate | `simulate(path)` |

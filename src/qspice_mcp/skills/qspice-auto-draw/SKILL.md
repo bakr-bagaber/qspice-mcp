@@ -63,7 +63,7 @@ Every required pin must get a net. Optional pins (marked `(opt)` below) may be l
 | `title` | a comment shown at the top-left of the sheet |
 | `inputs` / `outputs` | net names that are the signal input/output (normally detected automatically) |
 | `rails` | `{"vcc": "+", "vee": "-"}` marks supply nets explicitly (normally detected from names) |
-| `label_nets` | `"auto"` (default: every net you gave a real name gets a small label, so `V(name)` works in plots and `.meas`), `"minimal"` (only in/out/fb/... and nets used in directives), `"none"`, or a list of names |
+| `label_nets` | `"auto"` (default: every net you gave a real name gets a small label, so `V(name)` works in plots and `.meas`), `"minimal"` (only in/out/fb/... and nets used in directives), `"all"` (every signal net, even n1/net2-style names), `"none"`, or a list of names |
 | `ports` | for sub-sheets: nets that become hierarchical ports |
 | `options` | `{"effort": 1-3, "style": "compact" or "normal" or "spacious", "seed": 1}` |
 

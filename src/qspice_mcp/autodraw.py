@@ -721,6 +721,12 @@ class Placer:
                 cost += {"D": 0, "L": 3, "R": 3, "U": 8}[d]
             elif k == "pos":
                 cost += {"U": 0, "L": 3, "R": 3, "D": 8}[d]
+        # a shunt two-terminal part (load or bypass to ground) stands vertical with its
+        # ground below - never lying sideways with the ground hanging off one end
+        if p.kind == "2term" and not src:
+            for j, n in enumerate(p.nets):
+                if n and self.nets[n].kind == "ground" and g["dirs"][j] in ("L", "R"):
+                    cost += 4
         # a two-terminal part between rails/ground only (decoupling caps, bleeders)
         # stands vertical: rail label on top, ground symbol below
         if p.kind == "2term" and not src:
@@ -953,6 +959,11 @@ class Placer:
                 if right > minx - 300:
                     c += 30 + (right - minx + 300) / G * 4
                 c += abs(p.pos[1] - ref_y) / G * 3
+        # several input (signal) sources share one baseline, like the supplies
+        if len(self.input_parts) > 1:
+            ys = sorted(self.parts[i].pos[1] for i in self.input_parts)
+            mid = ys[len(ys) // 2]
+            c += sum(abs(y - mid) for y in ys) / G * 3
         # input (signal) sources sit at the left edge of the signal circuitry
         if self.input_parts:
             others = [self.parts[i].pos[0] for i in range(len(self.parts))
@@ -1151,6 +1162,7 @@ def route_drawing(parts: list[Part], nets: dict[str, NetInfo], label_names: set[
                         # through a text spot beats a detour around it
                         soft[(gx, gy)] = soft.get((gx, gy), 0) + 1.2
     R = Router(bounds, blocked, pin_net, soft)
+    R.easy = {pin_pts[(i, j)] for (i, j) in pin_pts if parts[i].kind == "2term"}
     # ---- stubs for ground / rails / single-pin labelled nets
     stub_list = []
     for (i, j), P in pin_pts.items():
@@ -1329,6 +1341,10 @@ def _pick_label_point(R: Router, rr, n, all_pins, dr):
     hgt = LINE_H
     taken = [(lp, ln) for lp, ln, _ in dr.labels]
     soft = R.soft
+    text_rects = []
+    for p_ in dr.parts:
+        for q_ in p_.geo[p_.code].get("labels", []):
+            text_rects.append((p_.pos[0] + q_[0], p_.pos[1] + q_[1], p_.pos[0] + q_[2], p_.pos[1] + q_[3]))
 
     def box_conflicts(x0, y0, x1, y1):
         c = 0
@@ -1345,6 +1361,9 @@ def _pick_label_point(R: Router, rr, n, all_pins, dr):
         for lp, _ in taken:
             if x0 - 150 <= lp[0] <= x1 + 150 and y0 - 150 <= lp[1] <= y1 + 150:
                 c += 4
+        for r_ in text_rects:                   # a part's refdes/value text
+            if x0 - 20 < r_[2] and r_[0] < x1 + 20 and y0 - 20 < r_[3] and r_[1] < y1 + 20:
+                c += 5
         return c
 
     best, bs = None, 1e9
@@ -1598,7 +1617,7 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
         # default ("auto"/"all"/"named"): every net the author gave a real name gets a
         # label, so V(name) works in plots and .meas; "minimal": only in/out/fb/...
         # and nets used in directives; "none": no extra labels
-        if policy in ("auto", "all", "named") and not AUTO_NET.match(n):
+        if policy == "all" or (policy in ("auto", "named") and not AUTO_NET.match(n)):
             label_names.add(n)
         elif policy not in ("none",) and (n.lower() in referenced or IO_NET.match(n)):
             label_names.add(n)
@@ -1642,7 +1661,9 @@ def draw(spec: dict, out_path: str | Path | None = None, validate: bool = True) 
         pl.anneal(iters, T0=temps[s % len(temps)])
         state = [(p.pos, p.code) for p in parts]
         dr = route_drawing(parts, nets, set(label_names), style)
-        sc = _score(dr) + pl.total() / 60.0
+        # routing quality + drafting quality of the placement (flow, orientation, spacing):
+        # a compact route must not win over a layout that breaks the drafting rules
+        sc = _score(dr) + pl.total() / 20.0
         tried.append(round(sc, 1))
         if best is None or sc < best[0]:
             best = (sc, state)

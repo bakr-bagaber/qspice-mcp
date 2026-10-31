@@ -347,8 +347,11 @@ def get_symbol(name: str, preview: bool = True) -> list:
 @mcp.tool()
 def search_models(query: str = "", kind: str | None = None, model_type: str | None = None, limit: int = 50) -> str:
     """Find .model / .subckt definitions in QSPICE's bundled libraries and your
-    symbol folders. kind = 'model' | 'subckt'; model_type e.g. 'NPN', 'NMOS', 'D'.
-    The 'name' goes into a component's value (e.g. value='2N3904')."""
+    symbol folders. kind = 'model' | 'subckt'; model_type e.g. 'NPN', 'NMOS', 'PMOS', 'D'
+    ('NMOS'/'PMOS' include the VDMOS power MOSFETs of that polarity, e.g. IRF640).
+    query words match the name, type, library file and ratings (e.g. 'Vishay').
+    Each hit lists 'ratings' when the model states them (mfg, Vds, Ids, Ron, Qg, ...).
+    The 'name' goes into a component's value (e.g. value='2N3904' / 'IRF640')."""
     return _js(models.search(query, kind, model_type, limit))
 
 
@@ -504,9 +507,19 @@ def _sim_summary(res: dict, max_vars=60) -> dict:
     out = {k: res.get(k) for k in ("netlist", "qraw", "log", "returncode", "elapsed_s", "wall_time_s", "errors", "warnings", "steps")}
     out["ok"] = bool(res.get("qraw")) and not res.get("errors")
     out["log_tail"] = res.get("log_text", "")[-2500:]
+    steps = res.get("steps") or []
     if res.get("measurements"):
-        out["measurements"] = res["measurements"]["results"]
+        m = dict(res["measurements"]["results"])
+        # .step runs: label each value with its step instead of a bare list
+        if steps:
+            for k, v in list(m.items()):
+                if isinstance(v, list) and len(v) == len(steps):
+                    m[k] = {re.sub(r"^\.step\s+", "", str(s)): x for s, x in zip(steps, v)}
+        out["measurements"] = m
         out["measurements_text"] = res["measurements"]["text"][-4000:]
+        if "(" in out["measurements_text"]:
+            out["measurements_note"] = ("In measurements_text, AC results print as (real, imag) pairs followed by "
+                                        "the x value; 'measurements' holds the parsed numbers.")
     if res.get("qraw"):
         try:
             pl = qraw.read(res["qraw"])
@@ -515,6 +528,19 @@ def _sim_summary(res: dict, max_vars=60) -> dict:
                 out["plots"].append({"plotname": p.plotname, "flags": p.flags, "points": p.n_points,
                                      "traces": p.names[:max_vars] + (["..."] if len(p.names) > max_vars else []),
                                      "steps": p.step_info()[:30], "plot_suggestions": p.suggestions})
+                # an operating point is a handful of numbers: return them directly
+                if "operating point" in (p.plotname or "").lower() or (p.n_points == 1 and not p.step_info()):
+                    op = {}
+                    for nm in p.names[:max_vars]:
+                        try:
+                            v = complex(p.trace(nm, 1)[0])
+                            op[nm] = float(f"{v.real:.6g}")
+                        except Exception:
+                            pass
+                    if op:
+                        out["operating_point"] = op
+                        out["operating_point_note"] = ("Resistor currents are not stored by QSPICE; use "
+                                                       "(V(a)-V(b))/R, the source current I(Vx), or the power P(Rx).")
         except Exception as e:
             out["plots"] = f"could not read waveform file: {e}"
     if not out["ok"]:
@@ -552,7 +578,9 @@ def netlist_schematic(path: str) -> str:
     """The SPICE netlist QSPICE generates for a .qsch (QUX.exe -Netlist). Use it to
     check what the simulator will actually see (node names, device lines, .lib)."""
     cir = runner.netlist(_p(path, ".qsch", must_exist=True))
-    return f"# {cir}\n" + runner.read_text(cir)
+    txt = runner.read_text(cir)
+    note = _netlist_note(txt)
+    return f"# {cir}\n" + (f"# {note}\n" if note else "") + txt
 
 
 @mcp.tool()
@@ -595,7 +623,24 @@ def get_trace_data(path: str, traces: list[str], step: int = 1, max_points: int 
         except KeyError:
             out["traces"][t] = {"error": f"unknown trace. Available: {pl.names[:50]}"}
             continue
-        d = {"stats": qraw.stats(y, xs)}
+        # statistics over exactly [x_min, x_max]: add interpolated end points so avg/rms
+        # match .meas (time-weighted, window edges included)
+        xs_s, y_s = xs, y
+        try:
+            xr = np.real(x)
+            if len(xr) > 1 and np.all(np.diff(xr) >= 0):
+                yall = pl.trace(t, step)
+
+                def at(v):
+                    r = np.interp(v, xr, np.real(yall))
+                    return r + 1j * np.interp(v, xr, np.imag(yall)) if np.iscomplexobj(yall) else r
+                if x_min is not None and xr[0] < x_min <= xr[-1] and (len(xs) == 0 or np.real(xs[0]) > x_min):
+                    xs_s = np.concatenate(([x_min], np.real(xs_s))); y_s = np.concatenate(([at(x_min)], y_s))
+                if x_max is not None and xr[0] <= x_max < xr[-1] and (len(xs) == 0 or np.real(xs[-1]) < x_max):
+                    xs_s = np.concatenate((np.real(xs_s), [x_max])); y_s = np.concatenate((y_s, [at(x_max)]))
+        except Exception:
+            xs_s, y_s = xs, y
+        d = {"stats": qraw.stats(y_s, xs_s)}
         if np.iscomplexobj(y):
             d["magnitude_dB"] = [float(20 * np.log10(abs(v) + 1e-300)) for v in y[idx]]
             d["phase_deg"] = [float(np.angle(v, deg=True)) for v in y[idx]]
@@ -635,9 +680,20 @@ def measure(path: str, statements: list[str]) -> str:
         statements = [qraw.to_raw_names(s, names) for s in statements]
     except Exception:
         pass
-    tmp = raw.with_name(raw.stem + "_meas.cir")
+    # helper netlist in the temp folder (nothing is left next to the user's files)
+    import tempfile
+    tdir = Path(tempfile.gettempdir()) / "qspice-mcp"
+    tdir.mkdir(parents=True, exist_ok=True)
+    tmp = tdir / f"{raw.stem}_{os.getpid()}_{int(time.time() * 1000) % 10**9}_meas.cir"
     tmp.write_text("* measurements\n" + "\n".join(statements) + "\n.end\n", encoding="latin-1", errors="replace")
-    res = runner.qpost(tmp, raw)
+    try:
+        res = runner.qpost(tmp, raw)
+    finally:
+        for f in (tmp, tmp.with_suffix(".meas.txt")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
     return _js(res)
 
 
@@ -829,6 +885,17 @@ def validate_schematic(path: str) -> str:
 
 # ===================================================== schematic: create ===
 
+_SPECIAL = {"Ã": "Ã = op-amp/comparator device", "¥": "¥ = an unused pin of a multi-pin device",
+            "Ø": "Ø = C++/Verilog DLL block", "€": "€ = DAC device", "£": "£ = digital multi-function device",
+            "×": "× = transformer", "´": "´ separates QSPICE's device letter from your designator "
+                                                 "(Ã´U1 is your U1)"}
+
+
+def _netlist_note(txt: str) -> str | None:
+    hits = [v for k, v in _SPECIAL.items() if k in (txt or "")]
+    return ("QSPICE netlist notation (normal, not garbled): " + "; ".join(hits)) if hits else None
+
+
 def _draw_result(res: dict, sch: Schematic, show: bool) -> list:
     res.pop("attempt_scores", None)          # internal layout costs - not meaningful to users
     m = res.pop("metrics", None)             # router-internal lengths differ from review stats
@@ -838,6 +905,8 @@ def _draw_result(res: dict, sch: Schematic, show: bool) -> list:
     v = res.get("validation", {})
     if "netlist" in v and len(v["netlist"]) > 4000:
         v["netlist"] = v["netlist"][:4000] + "\n..."
+    if _netlist_note(v.get("netlist", "")):
+        v["netlist_note"] = _netlist_note(v.get("netlist", ""))
     # names the simulator will use for nets that are not labelled on the sheet
     nm = v.pop("net_map", None) or {}
     renamed = {k: str(a).upper() if str(a).lower().startswith("n") and str(a)[1:].isdigit() else a
@@ -845,9 +914,10 @@ def _draw_result(res: dict, sch: Schematic, show: bool) -> list:
     if renamed:
         res["unlabelled_nets"] = {
             "simulation_names": renamed,
-            "note": ("These spec nets are not labelled on the sheet, so QSPICE gives them automatic names "
-                     "(use V(N03) etc. in plots/.meas), or label them: add_net_label(at='<REF.PIN>', name='<net>') "
-                     "or list them in the spec's label_nets.")}
+            "note": ("These spec nets are not labelled on the sheet (names like n1, net2, N001 count as "
+                     "automatic names), so QSPICE gives them automatic names: use V(N03) etc. in plots/.meas, "
+                     "or label them: add_net_label(at='<REF.PIN>', name='<net>'), or redraw with the spec's "
+                     "label_nets='all' or label_nets=['n1', ...].")}
     rv = res.get("review") or {}
     if rv.get("score") is not None:
         res["next"] = ("Look at the picture. " + ("Score >= 90: good. " if rv["score"] >= 90 else
@@ -999,6 +1069,27 @@ def new_schematic(path: str, overwrite: bool = False) -> str:
     return _js({"file": str(p)})
 
 
+@mcp.tool()
+def copy_schematic(path: str, new_path: str, overwrite: bool = False) -> str:
+    """Save a copy of a schematic under a new name ('save as'), e.g. to repair or edit
+    a copy and keep the original. Edit tools always change the file they are given.
+    A hierarchical sheet's child .qsch files must stay in the same folder."""
+    src = _p(path, ".qsch", must_exist=True)
+    dst = _p(new_path, ".qsch")
+    if dst.exists() and not overwrite:
+        raise FileExistsError(f"{dst} exists (pass overwrite=true)")
+    if dst.exists():
+        _backup(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+    note = ""
+    if src.parent.resolve() != dst.parent.resolve():
+        kids = [c.symbol.name for c in Schematic.load(src).components() if not c.symbol.name and not c.symbol.type]
+        if kids:
+            note = "the sheet uses hierarchical blocks: copy their child .qsch files to the new folder too"
+    return _js({"file": str(dst), "from": str(src), **({"note": note} if note else {})})
+
+
 # ===================================================== schematic: edit ====
 
 @mcp.tool()
@@ -1089,6 +1180,21 @@ def delete_items(path: str, refs: list[str] | None = None, wires_at: list[list[i
     return _edit(path, lambda sch: canvas.delete(sch, refs or [], wires_at or [], labels_at or []), show)
 
 
+def _tidy(sch, info):
+    """After drawing wires: re-place reference/value texts that a wire now runs through."""
+    try:
+        from .edit import _texts_hit_by_wires
+        from . import labels as _labels
+        hit = _texts_hit_by_wires(sch)
+        if hit:
+            _labels.optimize(sch, sorted(hit))
+            if isinstance(info, dict):
+                info["texts_moved"] = sorted(hit)
+    except Exception:
+        pass
+    return info
+
+
 def _connect(sch, a, b):
     if isinstance(b, str) and "." not in b:
         gnd = b.upper() in ("GND", "0", "GROUND")
@@ -1109,7 +1215,7 @@ def connect_pins(path: str, from_pin: str, to: str | list[int], show: bool = Fal
     symbol) | 'out' (a net label named out). The router avoids part bodies, never
     touches other nets, and adds T-junction dots. If no route is found, connect
     with net labels (to='<net name>') on both pins instead."""
-    return _edit(path, lambda sch: _connect(sch, from_pin, to), show)
+    return _edit(path, lambda sch: _tidy(sch, _connect(sch, from_pin, to)), show)
 
 
 @mcp.tool()
@@ -1124,7 +1230,7 @@ def connect_many(path: str, connections: list[list], show: bool = True) -> list:
                 done.append({"from": a, "to": b, **_connect(sch, a, b)})
             except Exception as e:
                 failed.append({"from": a, "to": b, "error": str(e)})
-        return {"routed": done, "failed": failed}
+        return _tidy(sch, {"routed": done, "failed": failed})
     return _edit(path, fn, show)
 
 
@@ -1133,7 +1239,7 @@ def add_wire(path: str, points: list[list[int]], show: bool = False) -> list:
     """Draw an explicit wire through [x, y] points (orthogonal segments, snapped to the
     grid). Wires connect only at their END points (or where an end touches another
     wire); crossing wires do NOT connect. Prefer connect_pins (auto-routed)."""
-    return _edit(path, lambda sch: {"segments_added": canvas.add_polyline(sch, points)}, show)
+    return _edit(path, lambda sch: _tidy(sch, {"segments_added": canvas.add_polyline(sch, points)}), show)
 
 
 @mcp.tool()
@@ -1144,7 +1250,7 @@ def add_net_label(path: str, at: str | list[int], name: str, direction: str | No
     nets referenced in .meas/plots). stub=1 draws a short wire first in `direction`
     (U/D/L/R; default = the way the pin points). port=True makes a hierarchical port
     (sub-sheets). name 'GND' draws a ground symbol."""
-    return _edit(path, lambda sch: canvas.add_label(sch, at, name, direction, port, stub), show)
+    return _edit(path, lambda sch: _tidy(sch, canvas.add_label(sch, at, name, direction, port, stub)), show)
 
 
 @mcp.tool()
@@ -1153,7 +1259,7 @@ def add_ground(path: str, at: str | list[int], direction: str | None = None, stu
     """Attach a ground symbol to a pin ('C1.2') or point. It always points down
     (sideways pins get a short L-shaped stub). Use one ground symbol per return
     point instead of long ground wires."""
-    return _edit(path, lambda sch: canvas.add_label(sch, at, "GND", direction, False, stub), show)
+    return _edit(path, lambda sch: _tidy(sch, canvas.add_label(sch, at, "GND", direction, False, stub)), show)
 
 
 @mcp.tool()

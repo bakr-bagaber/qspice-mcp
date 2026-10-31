@@ -223,6 +223,10 @@ def _router_for(sch: Schematic, allow_nets: set):
     MERGE = "__route__"
     pins = {p: (MERGE if n in allow_nets else n) for p, n in pin_net.items()}
     R = Router(bounds, blocked, pins)
+    for c in sch.components():
+        pp = c.pin_positions()
+        if len([1 for p, _ in pp if not p.default_net]) == 2 and len(pp) <= 3:
+            R.easy.update(tuple(w) for p, w in pp if not p.default_net)
     # existing wires: occupy their grid points/edges
     wire_net = {}
     for a, b, _ in sch.wires():

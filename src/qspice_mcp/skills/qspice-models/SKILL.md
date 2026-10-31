@@ -19,7 +19,8 @@ description: Device models in QSPICE - which models are bundled, how to find the
 
 ```
 search_models('1N4148')                 # by name
-search_models('', model_type='NMOS')    # all NMOS models
+search_models('', model_type='NMOS')    # all N-channel MOSFETs, incl. VDMOS power FETs (IRF640 ...)
+search_models('Vishay', model_type='NMOS')  # query words also match ratings / manufacturer
 search_models('schottky')               # by library file name
 get_model_text('1N4148')                # the .model text
 ```
@@ -41,6 +42,8 @@ Not bundled: `2N3904`, `2N3906`, `2N2222`, `BC547` - add a `.model` line (sectio
 ```
 
 - Power MOSFETs: use type `VDMOS` (add `pchan` for P-channel) on the `NMOS`/`PMOS` symbols.
+- Each search hit shows the `ratings` the model states (e.g. `Vds=200 Ids=18 Ron=0.18 mfg=Vishay`):
+  pick a part whose Vds/Ids exceed the circuit's voltage/current with margin.
 - Simple ideal switch (no model): the `SW` symbol with params `Ron`, `Roff`, `Vt`, `Vh`.
 - Long `.model` lines are fine; the server wraps them into `+` continuation lines on the sheet.
 

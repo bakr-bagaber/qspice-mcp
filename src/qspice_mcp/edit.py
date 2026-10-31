@@ -74,7 +74,11 @@ def parts_from_schematic(sch: Schematic, sc=None) -> list[Part]:
 
 
 def issues_delta(before: dict, after: dict) -> dict:
-    key = lambda d: (d["code"], d["message"])
+    # an issue is "the same" when its code and location match (a renamed part keeps its
+    # old problems - they are not new); issues without a location compare by message
+    def key(d):
+        at = d.get("at")
+        return (d["code"], tuple(round(float(v)) for v in at)) if at else (d["code"], d["message"])
     old = {key(d) for d in before.get("issues", [])}
     new = [d for d in after.get("issues", []) if key(d) not in old and d["severity"] != "style"]
     fixed = len([1 for d in before.get("issues", []) if key(d) not in {key(x) for x in after.get("issues", [])}])

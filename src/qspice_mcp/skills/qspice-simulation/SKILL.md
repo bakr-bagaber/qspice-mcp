@@ -103,6 +103,11 @@ circuits). Most circuits: default.
 | Bias point? | `.op` then `get_trace_data(path, ['V(b)','V(c)','I(R1)'])` |
 | Efficiency? | `.meas pin AVG -V(vin)*I(V1)` and `.meas pout AVG V(out)*I(R1)` -> pout/pin |
 
+Operating point (`.op`): `simulate` returns the values directly in `operating_point`
+(`{'V(out)': 3.19728, 'I(V1)': -0.00068, ...}`) - no extra call needed.
+QSPICE does not store resistor currents: use `(V(a)-V(b))/R`, a source current `I(V1)`, or the
+power `P(R1)`; capacitor/inductor/source currents (`I(C1)`, `I(L1)`, `I(V1)`) are stored.
+
 Trace names: node voltage `V(out)` (only LABELLED nets have your names; unlabelled nets are `V(N03)` etc.);
 differential `V(a,b)`; current through a two-terminal part `I(R1)`; transistor terminal currents
 `Ic(Q1)`, `Ib(Q1)`, `Id(M1)`; inside a sub-circuit/sub-sheet `I(R1.X1)` (part R1 inside X1).
